@@ -24,9 +24,9 @@ import itertools
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
+    QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 import matplotlib.pyplot as plt
 
@@ -102,9 +102,19 @@ class PeakTab(QWidget):
         """Group holding the per-peak 'max allowed gap from Peak 1'
         settings. Its contents are rebuilt whenever Number of Peaks
         changes (one spinbox per peak beyond the first).
+
+        A master "Enable Gap Filtering" checkbox toggles the whole
+        feature: when unchecked, the per-peak spinboxes are disabled and
+        peak detection runs with ``max_gaps=None`` (far peaks are kept as
+        their own points rather than being overlapped onto Peak 1).
         """
         self.gap_group = QGroupBox("Peak Gap Filtering")
         self.gap_layout = QFormLayout(self.gap_group)
+
+        self.gap_enabled_checkbox = QCheckBox("Enable Gap Filtering")
+        self.gap_enabled_checkbox.setChecked(True)
+        self.gap_enabled_checkbox.toggled.connect(self._update_gap_enabled_state)
+        self.gap_layout.addRow(self.gap_enabled_checkbox)
 
         note = QLabel("If a peak is found farther than this from Peak 1,\n"
                        "it's treated as noise and overlapped onto Peak 1.")
@@ -122,9 +132,9 @@ class PeakTab(QWidget):
         """
         previous_values = [sb.value() for sb in self._gap_spinboxes]
 
-        # Clear all rows except the note label (row 0).
-        while self.gap_layout.rowCount() > 1:
-            self.gap_layout.removeRow(1)
+        # Clear all rows except the checkbox (row 0) and note (row 1).
+        while self.gap_layout.rowCount() > 2:
+            self.gap_layout.removeRow(2)
         self._gap_spinboxes = []
 
         n_settings = max(num_peaks - 1, 0)
@@ -137,6 +147,18 @@ class PeakTab(QWidget):
             spin.setValue(value)
             self.gap_layout.addRow(f"Peak {i + 2} Max Gap (T):", spin)
             self._gap_spinboxes.append(spin)
+
+        self._update_gap_enabled_state()
+
+    def _update_gap_enabled_state(self, *_args):
+        """Enable/disable the per-peak gap spinboxes to match the master
+        'Enable Gap Filtering' checkbox.
+        """
+        if not hasattr(self, "gap_enabled_checkbox"):
+            return
+        enabled = self.gap_enabled_checkbox.isChecked()
+        for spin in self._gap_spinboxes:
+            spin.setEnabled(enabled)
 
     def _current_max_gaps(self):
         return [sb.value() for sb in self._gap_spinboxes]
@@ -175,7 +197,7 @@ class PeakTab(QWidget):
             QMessageBox.warning(self, "Invalid setting", err)
             return
 
-        max_gaps = self._current_max_gaps()
+        max_gaps = self._current_max_gaps() if self.gap_enabled_checkbox.isChecked() else None
 
         self.canvas.figure.clear()
         ax = self.canvas.figure.add_subplot(111)
