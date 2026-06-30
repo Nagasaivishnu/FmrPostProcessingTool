@@ -5,9 +5,10 @@ Tab: Peak Analysis.
 
 Takes the processed heatmap data (field x frequency x intensity) and, for
 each frequency's field-sweep cross-section, finds the strongest N peaks
-(N = user input). The resulting peak field-positions are plotted against
-frequency as dash-dot lines (one "track" per peak rank, per dataset), and
-can be exported to CSV/TXT/Excel.
+(N = user input). The resulting peak field-positions are plotted with
+Magnetic Field on the x-axis and Frequency on the y-axis as dash-dot lines
+(one "track" per peak rank, per dataset), and can be exported to
+CSV/TXT/Excel.
 """
 
 from __future__ import annotations
@@ -143,12 +144,12 @@ class PeakTab(QWidget):
                 if len(freqs) == 0:
                     continue
                 linestyle = _LINESTYLES[peak_idx % len(_LINESTYLES)]
-                ax.plot(freqs, fields, linestyle=linestyle, marker="o", markersize=3,
+                ax.plot(fields, freqs, linestyle=linestyle, marker="o", markersize=3,
                         linewidth=1.5, color=color,
                         label=f"{label} - Peak {peak_idx + 1}")
 
-        ax.set_xlabel("Frequency (GHz)")
-        ax.set_ylabel("Peak Field Position")
+        ax.set_xlabel("Peak Field Position")
+        ax.set_ylabel("Frequency (GHz)")
         ax.set_title(f"Peak Position vs Frequency (top {num_peaks} peak(s) per cross-section)")
         ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
