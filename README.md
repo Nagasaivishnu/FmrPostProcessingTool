@@ -55,11 +55,23 @@ python main.py
    cross-section), and click **Find Peaks**. Each peak "track" (the 1st,
    2nd, ... peak, ordered by field position so it follows the same
    resonance branch across frequency rather than jumping by amplitude
-   rank) is plotted as a dash-dot line of Peak Field Position vs
-   Frequency, one color per dataset. Frequencies with fewer peaks than
-   requested are left blank (with a warning) rather than crashing.
+   rank) is plotted as a dash-dot line of Peak Field Position (x-axis) vs
+   Frequency (y-axis), one color per dataset. Frequencies with fewer
+   peaks than requested are left blank (with a warning) rather than
+   crashing.
+
+   **Peak Gap Filtering**: for each peak beyond the first, a "Peak *n*
+   Max Gap (T)" setting appears (so Number of Peaks = 3 shows 2 gap
+   settings), defaulting to 0.05 T. If a found peak sits farther from
+   Peak 1 than its allowed gap, it's treated as a noise peak: instead of
+   being plotted as a stray far-field point, its position is overlapped
+   onto Peak 1's, so the track stays continuous instead of jumping out to
+   the noise. A summary warning reports how many points were filtered
+   this way.
+
    **Export Peak Data...** writes a long-format table (dataset, peak
-   index, frequency, field, intensity) to CSV, TXT, or Excel.
+   index, frequency, field, intensity) to CSV, TXT, or Excel, reflecting
+   any gap-filtered overlaps.
 
 6. **Data Export** — Export a processed dataset's full field/frequency/
    intensity matrix (CSV, TXT, NPY, MAT) or re-render and save its heatmap
