@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from processing.dataset_processor import ProcessedDataset
+from processing.peak_analysis import PeakResult
 
 
 def export_heatmap(result: ProcessedDataset, output_path: str, fmt: str = "csv") -> None:
@@ -64,6 +65,52 @@ def export_slice(x_values: np.ndarray, series: Dict[str, np.ndarray],
     data = {x_label: x_values}
     data.update(series)
     df = pd.DataFrame(data)
+
+    fmt = fmt.lower()
+    if fmt == "excel":
+        df.to_excel(output_path.with_suffix(".xlsx"), index=False)
+    elif fmt == "txt":
+        df.to_csv(output_path, sep="\t", index=False)
+    else:
+        df.to_csv(output_path, index=False)
+
+
+def export_peak_data(peak_results: Dict[str, PeakResult], output_path: str,
+                      fmt: str = "csv") -> None:
+    """Export peak-tracking results (one or more datasets) to a flat,
+    long-format table: one row per (dataset, frequency, peak index).
+
+    A long format is used (rather than one column per peak) because
+    different datasets can have different frequency axes, so there's no
+    single shared x-axis to align wide columns against - the same
+    convention problem that motivated keeping this separate from
+    :func:`export_slice`.
+
+    Parameters
+    ----------
+    peak_results : dict
+        Mapping of {dataset_label: PeakResult}.
+    fmt : "csv" | "txt" | "excel"
+    """
+    output_path = Path(output_path)
+
+    rows = []
+    for label, peak_result in peak_results.items():
+        for peak_idx in range(peak_result.num_peaks):
+            for freq, peak_field, peak_height in zip(
+                peak_result.frequencies,
+                peak_result.peak_fields[peak_idx, :],
+                peak_result.peak_heights[peak_idx, :],
+            ):
+                rows.append({
+                    "dataset": label,
+                    "peak_index": peak_idx + 1,
+                    "frequency_GHz": freq,
+                    "field": peak_field,
+                    "intensity": peak_height,
+                })
+
+    df = pd.DataFrame(rows, columns=["dataset", "peak_index", "frequency_GHz", "field", "intensity"])
 
     fmt = fmt.lower()
     if fmt == "excel":

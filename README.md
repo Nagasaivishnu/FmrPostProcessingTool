@@ -50,7 +50,18 @@ python main.py
    - **Field Slice**: same idea, but pick a magnetic field value and plot
      Signal vs Frequency.
 
-5. **Data Export** — Export a processed dataset's full field/frequency/
+5. **Peak Analysis** — Check which processed datasets to include, set
+   **Number of Peaks** (the strongest N local maxima per frequency's field
+   cross-section), and click **Find Peaks**. Each peak "track" (the 1st,
+   2nd, ... peak, ordered by field position so it follows the same
+   resonance branch across frequency rather than jumping by amplitude
+   rank) is plotted as a dash-dot line of Peak Field Position vs
+   Frequency, one color per dataset. Frequencies with fewer peaks than
+   requested are left blank (with a warning) rather than crashing.
+   **Export Peak Data...** writes a long-format table (dataset, peak
+   index, frequency, field, intensity) to CSV, TXT, or Excel.
+
+6. **Data Export** — Export a processed dataset's full field/frequency/
    intensity matrix (CSV, TXT, NPY, MAT) or re-render and save its heatmap
    figure (PNG, SVG, PDF, EPS) at 300/600/1200 DPI.
 
@@ -67,23 +78,25 @@ or the warning dialogs after loading/processing.
 ```
 main.py
 gui/
-    main_window.py       Top-level window, assembles all 5 tabs
+    main_window.py       Top-level window, assembles all 6 tabs
     app_state.py          Shared state object passed between tabs
     import_tab.py         Tab 1
     processing_tab.py     Tab 2
     heatmap_tab.py        Tab 3
     section_tab.py        Tab 4 (Frequency Slice + Field Slice sub-tabs)
-    export_tab.py         Tab 5
+    peak_tab.py           Tab 5 (Peak Analysis)
+    export_tab.py         Tab 6
 processing/
     loader.py             Directory scanning, file reading, frequency parsing
     preprocessing.py      DC removal, detrend, Savitzky-Golay, background sub,
                            enhancement, absorption/derivative computation
     dataset_processor.py  Runs preprocessing over a full dataset, builds the
                            2D matrix, frequency/field slicing
+    peak_analysis.py      Per-frequency peak detection and peak-track building
 plotting/
     mpl_canvas.py          Reusable embedded Matplotlib widget (toolbar +
                             crosshair readout)
 utils/
     exporters.py           CSV/TXT/NPY/MAT heatmap export, slice export,
-                            figure export
+                            peak-data export, figure export
 ```
