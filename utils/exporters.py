@@ -121,6 +121,54 @@ def export_peak_data(peak_results: Dict[str, PeakResult], output_path: str,
         df.to_csv(output_path, index=False)
 
 
+def export_fit_parameters(dataset_fits: Dict[str, "object"], output_path: str,
+                          fmt: str = "csv") -> None:
+    """Export curve-fit parameters to a flat table: one row per
+    (dataset, peak). Columns include the model, formula, each fitted
+    constant with its standard error, R-squared, point count, and success
+    flag.
+
+    ``dataset_fits`` maps {dataset_label: DatasetFit}; it is duck-typed
+    (only ``.model`` and ``.peak_fits`` are accessed) to keep this module
+    free of a hard dependency on :mod:`processing.curve_fitting`.
+
+    fmt : "csv" | "txt" | "excel"
+    """
+    output_path = Path(output_path)
+
+    rows = []
+    for label, dfit in dataset_fits.items():
+        model = dfit.model
+        for pf in dfit.peak_fits:
+            row = {
+                "dataset": label,
+                "peak_index": pf.peak_index + 1,
+                "model": model.key,
+                "formula": model.formula,
+                "n_points": pf.n_points,
+                "n_rejected": getattr(pf, "n_rejected", 0),
+                "n_total": getattr(pf, "n_total", pf.n_points),
+                "r_squared": pf.r_squared,
+                "success": pf.success,
+            }
+            for name, val, err in zip(model.param_names, pf.params, pf.param_errors):
+                row[name] = val
+                row[f"{name}_err"] = err
+            for dname, dval in getattr(pf, "derived", {}).items():
+                row[f"derived_{dname}"] = dval
+            rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    fmt = fmt.lower()
+    if fmt == "excel":
+        df.to_excel(output_path.with_suffix(".xlsx"), index=False)
+    elif fmt == "txt":
+        df.to_csv(output_path, sep="\t", index=False)
+    else:
+        df.to_csv(output_path, index=False)
+
+
 def save_figure(figure, output_path: str, fmt: str = "png", dpi: int = 300) -> None:
     """Save a Matplotlib figure to disk in the requested format/DPI.
 

@@ -24,15 +24,18 @@ import itertools
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QMessageBox, QPushButton, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
 import matplotlib.pyplot as plt
 
 from plotting.mpl_canvas import MplCanvas
 from processing.peak_analysis import DEFAULT_MAX_GAP, compute_peaks, validate_num_peaks
-from utils.exporters import export_peak_data
+from processing.curve_fitting import (
+    DEFAULT_MODEL_KEY, FIT_MODELS, FIT_MODELS_BY_KEY, fit_peak_result, format_fit,
+)
+from utils.exporters import export_fit_parameters, export_peak_data
 
 # Distinct line styles per peak rank so overlapping tracks stay readable;
 # cycles if num_peaks exceeds this list's length.
@@ -45,6 +48,8 @@ class PeakTab(QWidget):
         super().__init__(parent)
         self.app_state = app_state
         self._last_peak_results = {}  # label -> PeakResult, from the most recent "Find Peaks" run
+        self._last_fits = {}          # label -> DatasetFit, from the most recent "Fit Peaks" run
+        self._last_max_field = None   # field cutoff used in the most recent run (or None)
         self._gap_spinboxes = []  # one QDoubleSpinBox per peak beyond the first
         self._build_ui()
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
@@ -59,16 +64,29 @@ class PeakTab(QWidget):
         controls.addWidget(self._build_dataset_group())
         controls.addWidget(self._build_settings_group())
         controls.addWidget(self._build_gap_group())
+        controls.addWidget(self._build_fit_group())
         controls.addStretch(1)
 
         controls_widget = QWidget()
         controls_widget.setLayout(controls)
-        controls_widget.setMaximumWidth(320)
+        controls_widget.setMaximumWidth(340)
 
         self.canvas = MplCanvas(figsize=(8, 6))
 
+        right = QVBoxLayout()
+        right.addWidget(self.canvas, stretch=1)
+        right.addWidget(QLabel("Curve Fit Results"))
+        self.fit_results_text = QTextEdit()
+        self.fit_results_text.setReadOnly(True)
+        self.fit_results_text.setMaximumHeight(170)
+        self.fit_results_text.setPlaceholderText(
+            "Curve-fit results will appear here after you click 'Fit Peaks'.")
+        right.addWidget(self.fit_results_text)
+        right_widget = QWidget()
+        right_widget.setLayout(right)
+
         root.addWidget(controls_widget)
-        root.addWidget(self.canvas, stretch=1)
+        root.addWidget(right_widget, stretch=1)
 
     def _build_dataset_group(self) -> QGroupBox:
         group = QGroupBox("Datasets")
@@ -87,6 +105,22 @@ class PeakTab(QWidget):
         self.num_peaks_spin.setValue(1)
         self.num_peaks_spin.valueChanged.connect(self._rebuild_gap_settings)
         layout.addRow("Number of Peaks:", self.num_peaks_spin)
+
+        self.max_field_checkbox = QCheckBox("Ignore peaks above field")
+        self.max_field_checkbox.setChecked(False)
+        self.max_field_checkbox.toggled.connect(self._on_max_field_toggled)
+        layout.addRow(self.max_field_checkbox)
+
+        self.max_field_spin = QDoubleSpinBox()
+        self.max_field_spin.setRange(0.0, 1e6)
+        self.max_field_spin.setDecimals(5)
+        self.max_field_spin.setSingleStep(0.01)
+        self.max_field_spin.setValue(0.15)
+        self.max_field_spin.setEnabled(False)
+        self.max_field_spin.setToolTip(
+            "Only peaks at or below this field are detected and used for "
+            "fitting; peaks above it are ignored.")
+        layout.addRow("Max Field (T):", self.max_field_spin)
 
         find_btn = QPushButton("Find Peaks")
         find_btn.clicked.connect(self.find_peaks)
@@ -122,6 +156,84 @@ class PeakTab(QWidget):
         self.gap_layout.addRow(note)
 
         return self.gap_group
+
+    def _build_fit_group(self) -> QGroupBox:
+        """Group for square-root curve fitting of the peak dispersion
+        (frequency vs resonance field). Lets the user pick a model, fit the
+        currently found peaks, overlay the fitted curves, and export the
+        recovered constants.
+        """
+        group = QGroupBox("Curve Fitting (Dispersion f vs H)")
+        layout = QFormLayout(group)
+
+        self.fit_model_combo = QComboBox()
+        for model in FIT_MODELS:
+            self.fit_model_combo.addItem(model.label, model.key)
+        default_idx = self.fit_model_combo.findData(DEFAULT_MODEL_KEY)
+        if default_idx >= 0:
+            self.fit_model_combo.setCurrentIndex(default_idx)
+        self.fit_model_combo.currentIndexChanged.connect(self._update_formula_label)
+        layout.addRow("Model:", self.fit_model_combo)
+
+        self.fit_formula_label = QLabel()
+        self.fit_formula_label.setWordWrap(True)
+        self.fit_formula_label.setStyleSheet("color: #333; font-style: italic;")
+        layout.addRow(self.fit_formula_label)
+
+        self.fit_overlay_checkbox = QCheckBox("Overlay fitted curves on plot")
+        self.fit_overlay_checkbox.setChecked(True)
+        self.fit_overlay_checkbox.toggled.connect(self._on_overlay_toggled)
+        layout.addRow(self.fit_overlay_checkbox)
+
+        self.fit_reject_checkbox = QCheckBox("Reject outliers (fit majority trend)")
+        self.fit_reject_checkbox.setChecked(True)
+        self.fit_reject_checkbox.toggled.connect(self._on_reject_toggled)
+        layout.addRow(self.fit_reject_checkbox)
+
+        self.fit_sigma_spin = QDoubleSpinBox()
+        self.fit_sigma_spin.setRange(1.0, 10.0)
+        self.fit_sigma_spin.setSingleStep(0.5)
+        self.fit_sigma_spin.setDecimals(1)
+        self.fit_sigma_spin.setValue(3.0)
+        self.fit_sigma_spin.setToolTip(
+            "Outlier threshold in robust standard deviations. "
+            "Lower = more aggressive rejection; higher = keep more points.")
+        layout.addRow("Outlier threshold (sigma):", self.fit_sigma_spin)
+
+        fit_btn = QPushButton("Fit Peaks")
+        fit_btn.clicked.connect(self.fit_peaks)
+        layout.addRow(fit_btn)
+
+        export_fit_btn = QPushButton("Export Fit Parameters...")
+        export_fit_btn.clicked.connect(self._export_fits)
+        layout.addRow(export_fit_btn)
+
+        self._update_formula_label()
+        return group
+
+    def _update_formula_label(self, *_args):
+        key = self.fit_model_combo.currentData()
+        model = FIT_MODELS_BY_KEY.get(key)
+        if model is None:
+            self.fit_formula_label.setText("")
+            return
+        text = f"Formula:  {model.formula}"
+        if model.note:
+            text += f"\n{model.note}"
+        self.fit_formula_label.setText(text)
+
+    def _on_overlay_toggled(self, _checked):
+        # Re-render to add/remove fitted curves without recomputing anything.
+        if self._last_peak_results:
+            self._render(self._last_peak_results, self._last_fits)
+
+    def _on_reject_toggled(self, checked):
+        if hasattr(self, "fit_sigma_spin"):
+            self.fit_sigma_spin.setEnabled(checked)
+
+    def _on_max_field_toggled(self, checked):
+        if hasattr(self, "max_field_spin"):
+            self.max_field_spin.setEnabled(checked)
 
     # --------------------------------------------------------------- logic
 
@@ -198,46 +310,125 @@ class PeakTab(QWidget):
             return
 
         max_gaps = self._current_max_gaps() if self.gap_enabled_checkbox.isChecked() else None
+        max_field = self.max_field_spin.value() if self.max_field_checkbox.isChecked() else None
 
-        self.canvas.figure.clear()
-        ax = self.canvas.figure.add_subplot(111)
-
-        color_cycle = itertools.cycle(plt.rcParams["axes.prop_cycle"].by_key()["color"])
         results = {}
         all_warnings = []
-
         for label in labels:
             processed = self.app_state.get_processed(label)
             if processed is None:
                 continue
-
-            peak_result = compute_peaks(processed, num_peaks, max_gaps=max_gaps)
+            peak_result = compute_peaks(processed, num_peaks, max_gaps=max_gaps,
+                                        max_field=max_field)
             results[label] = peak_result
             all_warnings.extend(f"[{label}] {w}" for w in peak_result.warnings)
 
+        self._last_peak_results = results
+        self._last_max_field = max_field
+        # Re-finding peaks invalidates any previous fit.
+        self._last_fits = {}
+        self.fit_results_text.clear()
+
+        self._render(results, fits=None)
+
+        if all_warnings:
+            QMessageBox.warning(self, "Peak detection completed with warnings",
+                                 "\n".join(all_warnings[:30]))
+
+    def _render(self, results, fits=None):
+        """Draw peak tracks (markers + dash-dot line per peak rank, one
+        color per dataset), and optionally overlay fitted dispersion curves
+        when ``fits`` is provided and overlay is enabled.
+        """
+        self.canvas.figure.clear()
+        ax = self.canvas.figure.add_subplot(111)
+
+        overlay = fits and self.fit_overlay_checkbox.isChecked()
+        color_cycle = itertools.cycle(plt.rcParams["axes.prop_cycle"].by_key()["color"])
+
+        for label, peak_result in results.items():
             color = next(color_cycle)
-            for peak_idx in range(num_peaks):
+            for peak_idx in range(peak_result.num_peaks):
                 freqs, fields = peak_result.track(peak_idx)
                 if len(freqs) == 0:
                     continue
                 linestyle = _LINESTYLES[peak_idx % len(_LINESTYLES)]
                 ax.plot(fields, freqs, linestyle=linestyle, marker="o", markersize=3,
-                        linewidth=1.5, color=color,
+                        linewidth=1.2, color=color, alpha=0.85,
                         label=f"{label} - Peak {peak_idx + 1}")
+
+            if overlay and label in fits:
+                rejected_labeled = False
+                for pf in fits[label].peak_fits:
+                    if pf.success and pf.H_fit.size:
+                        ax.plot(pf.H_fit, pf.f_fit, linestyle="-", linewidth=2.2,
+                                color=color, alpha=0.95, zorder=5,
+                                label=f"{label} - Peak {pf.peak_index + 1} fit")
+                    if getattr(pf, "H_out", None) is not None and pf.H_out.size:
+                        ax.plot(pf.H_out, pf.f_out, linestyle="none", marker="x",
+                                markersize=5, color="0.6", alpha=0.6, zorder=2,
+                                label="rejected (outliers)" if not rejected_labeled else None)
+                        rejected_labeled = True
 
         ax.set_xlabel("Peak Field Position")
         ax.set_ylabel("Frequency (GHz)")
-        ax.set_title(f"Peak Position vs Frequency (top {num_peaks} peak(s) per cross-section)")
+        title = "Peak Position vs Frequency"
+        if overlay:
+            title += " (with curve fit)"
+        ax.set_title(title)
+
+        if getattr(self, "_last_max_field", None) is not None:
+            ax.axvline(self._last_max_field, color="0.5", linestyle=":",
+                       linewidth=1.5, zorder=1,
+                       label=f"field cutoff = {self._last_max_field:g}")
+
         ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
         self.canvas.figure.tight_layout()
         self.canvas.draw()
 
-        self._last_peak_results = results
+    def fit_peaks(self):
+        if not self._last_peak_results:
+            QMessageBox.information(self, "No peaks yet", "Run 'Find Peaks' first.")
+            return
 
-        if all_warnings:
-            QMessageBox.warning(self, "Peak detection completed with warnings",
-                                 "\n".join(all_warnings[:30]))
+        model_key = self.fit_model_combo.currentData()
+        model = FIT_MODELS_BY_KEY[model_key]
+        reject = self.fit_reject_checkbox.isChecked()
+        sigma = self.fit_sigma_spin.value()
+
+        fits = {}
+        lines = [f"Model:  {model.formula}"]
+        if model.note:
+            lines.append(model.note)
+        if reject:
+            lines.append(f"Outlier rejection: ON (sigma = {sigma:g})")
+        else:
+            lines.append("Outlier rejection: OFF (fitting all points)")
+        lines.append("")
+
+        any_success = False
+        for label, peak_result in self._last_peak_results.items():
+            dataset_fit = fit_peak_result(peak_result, model_key=model_key,
+                                          reject_outliers=reject, sigma=sigma)
+            fits[label] = dataset_fit
+            lines.append(f"=== {label} ===")
+            for pf in dataset_fit.peak_fits:
+                lines.append("  " + format_fit(model, pf))
+                any_success = any_success or pf.success
+            lines.append("")
+
+        self._last_fits = fits
+        self.fit_results_text.setPlainText("\n".join(lines))
+        self._render(self._last_peak_results, fits=fits)
+
+        if not any_success:
+            QMessageBox.warning(
+                self, "Curve fitting",
+                "No peak track could be fitted. Each track needs at least 3 "
+                "detected points, and the data must follow the chosen "
+                "square-root model. Try a different model or fewer gap "
+                "restrictions.")
 
     def _export(self):
         if not self._last_peak_results:
@@ -262,3 +453,28 @@ class PeakTab(QWidget):
             return
 
         QMessageBox.information(self, "Export complete", f"Peak data exported to:\n{path}")
+
+    def _export_fits(self):
+        if not self._last_fits:
+            QMessageBox.information(self, "Nothing to export",
+                                     "Run 'Fit Peaks' first.")
+            return
+
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Export Fit Parameters", "", "CSV (*.csv);;Text (*.txt);;Excel (*.xlsx)")
+        if not path:
+            return
+
+        fmt = "csv"
+        if path.lower().endswith(".txt"):
+            fmt = "txt"
+        elif path.lower().endswith(".xlsx"):
+            fmt = "excel"
+
+        try:
+            export_fit_parameters(self._last_fits, path, fmt=fmt)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+
+        QMessageBox.information(self, "Export complete", f"Fit parameters exported to:\n{path}")

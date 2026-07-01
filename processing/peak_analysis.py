@@ -51,7 +51,8 @@ def validate_max_gaps(num_peaks: int, max_gaps: Sequence[float]) -> Optional[str
 
 def find_peak_positions(H_field: np.ndarray, signal: np.ndarray,
                          num_peaks: int,
-                         max_gaps: Optional[Sequence[float]] = None
+                         max_gaps: Optional[Sequence[float]] = None,
+                         max_field: Optional[float] = None
                          ) -> Tuple[np.ndarray, np.ndarray]:
     """Find the ``num_peaks`` strongest local maxima in a single
     field-sweep cross-section.
@@ -72,6 +73,10 @@ def find_peak_positions(H_field: np.ndarray, signal: np.ndarray,
         field/height are overlapped onto peak 1's values instead of being
         reported as a separate point. Length must be ``num_peaks - 1``;
         pass ``None`` to skip gap filtering entirely.
+    max_field : float, optional
+        If given, any local maximum whose field position is above this
+        value is ignored, so only peaks at or below ``max_field`` are
+        considered. Pass ``None`` for no field limit.
 
     Returns
     -------
@@ -84,6 +89,12 @@ def find_peak_positions(H_field: np.ndarray, signal: np.ndarray,
         return fields_out, heights_out
 
     peak_idx, _properties = find_peaks(signal)
+
+    # Ignore any peak above the field cutoff, so only sub-cutoff peaks are
+    # detected (and thus plotted and used for fitting).
+    if max_field is not None and len(peak_idx) > 0:
+        peak_idx = peak_idx[H_field[peak_idx] <= max_field]
+
     if len(peak_idx) == 0:
         return fields_out, heights_out
 
@@ -151,7 +162,8 @@ class PeakResult:
 
 
 def compute_peaks(result: ProcessedDataset, num_peaks: int,
-                   max_gaps: Optional[Sequence[float]] = None) -> PeakResult:
+                   max_gaps: Optional[Sequence[float]] = None,
+                   max_field: Optional[float] = None) -> PeakResult:
     """Run peak detection over every frequency in a processed dataset.
 
     Parameters
@@ -164,6 +176,9 @@ def compute_peaks(result: ProcessedDataset, num_peaks: int,
         Per-peak maximum allowed field distance from peak 1 (length
         ``num_peaks - 1``). Peaks farther than their limit are treated as
         noise and overlapped onto peak 1. ``None`` disables gap filtering.
+    max_field : float, optional
+        If given, peaks above this field are ignored; only peaks at or
+        below ``max_field`` are detected, plotted, and used for fitting.
     """
     peak_result = PeakResult(label=result.label, num_peaks=num_peaks)
 
@@ -190,7 +205,8 @@ def compute_peaks(result: ProcessedDataset, num_peaks: int,
     for i, freq in enumerate(result.sorted_frequencies):
         H = result.H_field_by_freq[freq]
         sig = result.processed[freq]
-        fields, heights = find_peak_positions(H, sig, num_peaks, max_gaps=max_gaps)
+        fields, heights = find_peak_positions(H, sig, num_peaks, max_gaps=max_gaps,
+                                              max_field=max_field)
         peak_fields[:, i] = fields
         peak_heights[:, i] = heights
         if np.any(np.isnan(fields)):
@@ -208,6 +224,11 @@ def compute_peaks(result: ProcessedDataset, num_peaks: int,
         peak_result.warnings.append(
             f"{n_missing} of {len(freqs)} frequencies had fewer than {num_peaks} "
             f"detectable peak(s); missing points are left blank in the plot/export."
+        )
+    if max_field is not None and np.all(np.isnan(peak_fields)):
+        peak_result.warnings.append(
+            f"No peaks were found at or below the field cutoff ({max_field:g}); "
+            f"try raising it or disabling the field limit."
         )
     if n_overlapped:
         peak_result.warnings.append(

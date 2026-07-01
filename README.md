@@ -60,14 +60,62 @@ python main.py
    peaks than requested are left blank (with a warning) rather than
    crashing.
 
-   **Peak Gap Filtering**: for each peak beyond the first, a "Peak *n*
-   Max Gap (T)" setting appears (so Number of Peaks = 3 shows 2 gap
-   settings), defaulting to 0.05 T. If a found peak sits farther from
+   **Ignore peaks above field**: tick this checkbox and set **Max Field
+   (T)** to only detect peaks at or below that field; any peak above it is
+   ignored, so the high-field region (often dominated by stray/noise
+   peaks) is excluded from both the tracks and the curve fit. The cutoff
+   is drawn as a dotted vertical line on the plot. This is a manual
+   complement to the automatic outlier rejection in the fitting step: use
+   the cutoff to remove a whole high-field region, and outlier rejection
+   to clean up scatter within the region you keep.
+
+   **Peak Gap Filtering**: an **Enable Gap Filtering** checkbox toggles
+   the whole feature on or off. When on, for each peak beyond the first a
+   "Peak *n* Max Gap (T)" setting appears (so Number of Peaks = 3 shows 2
+   gap settings), defaulting to 0.05 T. If a found peak sits farther from
    Peak 1 than its allowed gap, it's treated as a noise peak: instead of
    being plotted as a stray far-field point, its position is overlapped
    onto Peak 1's, so the track stays continuous instead of jumping out to
    the noise. A summary warning reports how many points were filtered
-   this way.
+   this way. When the checkbox is off, the gap spinboxes are disabled and
+   every detected peak is kept at its true position.
+
+   **Curve Fitting (dispersion f vs H)**: after finding peaks, pick a
+   dispersion model and click **Fit Peaks** to fit each peak track of
+   frequency vs resonance field. Models offered:
+
+   - `f = (γμ₀/2π)·√(H·(H + M_eff))` (default) — the in-plane Kittel
+     relation; `γμ₀/2π` is the gyromagnetic prefactor (~28 GHz/T for
+     g=2) and `M_eff` is the effective magnetization.
+   - `f = (γμ₀/2π)·√((H + H_k)·(H + H_k + M_eff))` — Kittel plus an
+     in-plane anisotropy field `H_k` (reduces to the default when H_k=0).
+   - `f = √(a·H² + b·H + c)` — the most flexible square-root form, fit by
+     robust linear least squares; the physical constants are derived from
+     it (`γμ₀/2π = √a`, `M_eff = b/a`).
+   - `f = A·√(H + B)` — a simple generic root.
+
+   The chosen formula is shown live. After fitting, the **Curve Fit
+   Results** panel under the plot lists, per dataset and per peak, the
+   recovered constants with 1-sigma standard errors, any derived physical
+   constants, the R² goodness of fit, and the number of points used. The
+   fitted curves are overlaid on the plot (toggle with **Overlay fitted
+   curves on plot**).
+
+   **Reject outliers (fit majority trend)** (on by default) makes the fit
+   ignore stray/noise peaks that don't follow the main dispersion, so a
+   minority of far-off points can't drag the curve into a non-physical
+   shape. It uses a RANSAC consensus in f² space (robust both to a large
+   fraction of outliers and to high-leverage points at extreme fields);
+   the **Outlier threshold (sigma)** control sets how aggressive the
+   rejection is (lower = stricter). Rejected points are drawn as faint
+   grey ×'s, the fitted curve is drawn only across the retained
+   (inlier) field range, and R² is computed on the inliers. Each track
+   needs at least a few detected points to fit (3 for two-parameter
+   models, 4 for three-parameter ones).
+
+   **Export Fit Parameters...** writes a table (dataset, peak, model,
+   formula, each constant and its error, derived constants, R², points
+   used, points rejected) to CSV, TXT, or Excel.
 
    **Export Peak Data...** writes a long-format table (dataset, peak
    index, frequency, field, intensity) to CSV, TXT, or Excel, reflecting
