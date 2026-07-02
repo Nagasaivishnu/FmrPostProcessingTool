@@ -145,6 +145,7 @@ class ExportTab(QWidget):
         ax.set_ylabel("Frequency (GHz)")
         ax.set_title(f"FMR Map: {label}")
         fig.colorbar(im, ax=ax, label="Intensity")
+        self.app_state.apply_ranges_to_axes(ax, x_kind="field", y_kind="frequency")
         fig.tight_layout()
 
         try:

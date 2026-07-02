@@ -12,7 +12,7 @@ and the state emits Qt signals so other tabs know to refresh.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
@@ -44,6 +44,8 @@ class AppState(QObject):
     datasets_changed = pyqtSignal()
     # Emitted whenever processed results are (re)computed.
     processed_changed = pyqtSignal()
+    # Emitted whenever the global display ranges (frequency/field) change.
+    display_range_changed = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -54,6 +56,11 @@ class AppState(QObject):
         self.use_background_subtraction: bool = False
 
         self.settings = PreprocessSettings()
+
+        # Global display ranges shared by every tab's plots. ``None`` means
+        # "auto" (let Matplotlib pick). Each is a (min, max) tuple.
+        self.freq_range: Optional[Tuple[float, float]] = None
+        self.field_range: Optional[Tuple[float, float]] = None
 
         # label -> ProcessedDataset
         self.processed: Dict[str, ProcessedDataset] = {}
@@ -83,3 +90,29 @@ class AppState(QObject):
 
     def processed_labels(self) -> List[str]:
         return list(self.processed.keys())
+
+    # --- Global display ranges ---------------------------------------------------
+
+    def set_display_ranges(self, freq_range: Optional[Tuple[float, float]],
+                           field_range: Optional[Tuple[float, float]]) -> None:
+        """Set the shared frequency/field display ranges (each a (min, max)
+        tuple or ``None`` for auto) and notify all tabs.
+        """
+        self.freq_range = freq_range
+        self.field_range = field_range
+        self.display_range_changed.emit()
+
+    def apply_ranges_to_axes(self, ax, x_kind: Optional[str] = None,
+                             y_kind: Optional[str] = None) -> None:
+        """Apply the shared ranges to a Matplotlib Axes. ``x_kind``/``y_kind``
+        say what quantity each axis represents: ``"field"``, ``"frequency"``,
+        or ``None`` (leave that axis alone). Ranges that are ``None`` (auto)
+        are skipped.
+        """
+        ranges = {"field": self.field_range, "frequency": self.freq_range}
+        xr = ranges.get(x_kind)
+        if xr is not None:
+            ax.set_xlim(xr[0], xr[1])
+        yr = ranges.get(y_kind)
+        if yr is not None:
+            ax.set_ylim(yr[0], yr[1])

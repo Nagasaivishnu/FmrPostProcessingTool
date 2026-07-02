@@ -37,6 +37,15 @@ python main.py
    on one dataset/frequency; **Process All Datasets** runs the full pipeline
    over everything loaded in Tab 1.
 
+   **Display Ranges (applied to all tabs)**: tick **Limit frequency range**
+   and/or **Limit field range** and set the min/max. These are global
+   axis limits shared by every tab's plots — the Heatmap, both Section
+   slices, the Peak Analysis plot, the exported heatmap figure, and this
+   preview all honor them, with the range applied to whichever axis
+   represents field or frequency in that plot. Each limit is independent;
+   leave a box unticked to auto-scale that quantity. Changes apply
+   immediately to any plot already on screen.
+
 3. **Heatmap Visualization** — Pick a processed dataset from the dropdown
    and view its 2D field-vs-frequency intensity map. Choose colormap,
    manual or auto color scaling, and interpolation. Zoom/pan/save/reset are
@@ -68,6 +77,19 @@ python main.py
    complement to the automatic outlier rejection in the fitting step: use
    the cutoff to remove a whole high-field region, and outlier rejection
    to clean up scatter within the region you keep.
+
+   **Background Reference Cutoff (per-frequency)**: a separate,
+   frequency-dependent version of the field cutoff. Tick **Use background
+   reference cutoff**, choose a **Background dataset** (e.g. a
+   background/reference measurement whose peak traces an unwanted feature),
+   the **Reference peak #** to use, and an optional **Margin below (T)**.
+   The tool takes that dataset's peak track, cleans it of outliers, and
+   uses it as a per-frequency ceiling: at each frequency, peaks in the
+   sample datasets are only searched for below the background peak's field
+   at that same frequency (minus the margin). This is drawn as a dashed
+   boundary curve on the plot. It is independent of the constant Max Field
+   cutoff above; when both are on, the more restrictive one wins at each
+   frequency.
 
    **Peak Gap Filtering**: an **Enable Gap Filtering** checkbox toggles
    the whole feature on or off. When on, for each peak beyond the first a

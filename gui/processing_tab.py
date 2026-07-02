@@ -33,6 +33,7 @@ class ProcessingTab(QWidget):
         super().__init__(parent)
         self.app_state = app_state
         self._build_ui()
+        self.app_state.display_range_changed.connect(self._apply_ranges_to_preview)
 
     # ------------------------------------------------------------------ UI
 
@@ -44,6 +45,7 @@ class ProcessingTab(QWidget):
         left.addWidget(self._build_conditioning_group())
         left.addWidget(self._build_enhancement_group())
         left.addWidget(self._build_quantity_group())
+        left.addWidget(self._build_display_range_group())
         left.addLayout(self._build_action_buttons())
         left.addStretch(1)
 
@@ -161,6 +163,81 @@ class ProcessingTab(QWidget):
 
         return group
 
+    def _build_display_range_group(self) -> QGroupBox:
+        """Global frequency/field display ranges applied to the plots in
+        every tab (Heatmap, Sections, Peak Analysis, and this preview).
+        Each range is independently enabled; when off, that axis auto-scales.
+        """
+        group = QGroupBox("E. Display Ranges (applied to all tabs)")
+        layout = QFormLayout(group)
+
+        self.freq_range_checkbox = QCheckBox("Limit frequency range (GHz)")
+        self.freq_range_checkbox.toggled.connect(self._on_display_range_changed)
+        layout.addRow(self.freq_range_checkbox)
+
+        self.freq_min_spin = QDoubleSpinBox()
+        self.freq_min_spin.setRange(0.0, 1000.0)
+        self.freq_min_spin.setDecimals(3)
+        self.freq_min_spin.setValue(2.0)
+        self.freq_min_spin.setEnabled(False)
+        self.freq_min_spin.valueChanged.connect(self._on_display_range_changed)
+        self.freq_max_spin = QDoubleSpinBox()
+        self.freq_max_spin.setRange(0.0, 1000.0)
+        self.freq_max_spin.setDecimals(3)
+        self.freq_max_spin.setValue(10.0)
+        self.freq_max_spin.setEnabled(False)
+        self.freq_max_spin.valueChanged.connect(self._on_display_range_changed)
+        layout.addRow("Min Frequency:", self.freq_min_spin)
+        layout.addRow("Max Frequency:", self.freq_max_spin)
+
+        self.field_range_checkbox = QCheckBox("Limit field range")
+        self.field_range_checkbox.toggled.connect(self._on_display_range_changed)
+        layout.addRow(self.field_range_checkbox)
+
+        self.field_min_spin = QDoubleSpinBox()
+        self.field_min_spin.setRange(-1e6, 1e6)
+        self.field_min_spin.setDecimals(6)
+        self.field_min_spin.setSingleStep(0.01)
+        self.field_min_spin.setValue(0.0)
+        self.field_min_spin.setEnabled(False)
+        self.field_min_spin.valueChanged.connect(self._on_display_range_changed)
+        self.field_max_spin = QDoubleSpinBox()
+        self.field_max_spin.setRange(-1e6, 1e6)
+        self.field_max_spin.setDecimals(6)
+        self.field_max_spin.setSingleStep(0.01)
+        self.field_max_spin.setValue(0.3)
+        self.field_max_spin.setEnabled(False)
+        self.field_max_spin.valueChanged.connect(self._on_display_range_changed)
+        layout.addRow("Min Field:", self.field_min_spin)
+        layout.addRow("Max Field:", self.field_max_spin)
+
+        return group
+
+    def _on_display_range_changed(self, *_args):
+        """Enable/disable the spinboxes to match their checkboxes, push the
+        ranges into app_state, and notify all tabs (which re-apply them).
+        """
+        freq_on = self.freq_range_checkbox.isChecked()
+        self.freq_min_spin.setEnabled(freq_on)
+        self.freq_max_spin.setEnabled(freq_on)
+        field_on = self.field_range_checkbox.isChecked()
+        self.field_min_spin.setEnabled(field_on)
+        self.field_max_spin.setEnabled(field_on)
+
+        freq_range = None
+        if freq_on:
+            lo, hi = self.freq_min_spin.value(), self.freq_max_spin.value()
+            if hi > lo:
+                freq_range = (lo, hi)
+
+        field_range = None
+        if field_on:
+            lo, hi = self.field_min_spin.value(), self.field_max_spin.value()
+            if hi > lo:
+                field_range = (lo, hi)
+
+        self.app_state.set_display_ranges(freq_range, field_range)
+
     def _build_action_buttons(self) -> QHBoxLayout:
         layout = QHBoxLayout()
         preview_btn = QPushButton("Preview Processing")
@@ -247,7 +324,17 @@ class ProcessingTab(QWidget):
         ax.set_ylabel(self.app_state.settings.output_quantity.replace("_", " ").title())
         ax.set_title(f"{entry.label} @ {freq:g} GHz (preview)")
         ax.grid(alpha=0.3)
+        self.app_state.apply_ranges_to_axes(ax, x_kind="field")
         self.preview_canvas.figure.tight_layout()
+        self.preview_canvas.draw()
+
+    def _apply_ranges_to_preview(self):
+        """Re-apply the global display ranges to the existing preview axes
+        (if any) when the ranges change, without reprocessing."""
+        axes = self.preview_canvas.figure.axes
+        if not axes:
+            return
+        self.app_state.apply_ranges_to_axes(axes[0], x_kind="field")
         self.preview_canvas.draw()
 
     def _process_all(self):

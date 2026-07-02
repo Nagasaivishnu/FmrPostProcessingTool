@@ -161,9 +161,71 @@ class PeakResult:
         return self.frequencies[mask], fields[mask]
 
 
+@dataclass
+class ReferenceFieldCutoff:
+    """A per-frequency field ceiling derived from a *background* dataset's
+    peak track. For a given frequency, :meth:`field_at` returns the field
+    below which peaks should be searched for in the sample data.
+
+    ``freqs`` are sorted/unique and ``fields`` is the boundary field at
+    each (with any margin already subtracted). Outside the reference
+    frequency range the boundary is clamped to the nearest endpoint.
+    """
+
+    freqs: np.ndarray
+    fields: np.ndarray
+
+    def field_at(self, frequency: float) -> float:
+        return float(np.interp(frequency, self.freqs, self.fields))
+
+    def fields_for(self, frequencies: Sequence[float]) -> np.ndarray:
+        return np.interp(np.asarray(frequencies, dtype=float), self.freqs, self.fields)
+
+
+def build_reference_field_curve(bg_result: "PeakResult", peak_index: int = 0,
+                                 margin: float = 0.0, clean: bool = True,
+                                 sigma: float = 3.0) -> Optional[ReferenceFieldCutoff]:
+    """Build a :class:`ReferenceFieldCutoff` from a background dataset's
+    peak track.
+
+    The background peak track (frequency, field) is optionally cleaned of
+    outliers (reusing the robust mask from :mod:`processing.curve_fitting`),
+    collapsed to one field per frequency, and stored as a monotonic
+    boundary. ``margin`` (in field units) is subtracted so sample peaks are
+    searched strictly below the background. Returns ``None`` if the track
+    has too few usable points.
+    """
+    freqs, fields = bg_result.track(peak_index)   # (frequencies, fields)
+    if freqs.size < 2:
+        return None
+
+    if clean:
+        try:
+            from .curve_fitting import _robust_inlier_mask
+            mask = _robust_inlier_mask(fields, freqs, sigma=sigma)
+            if mask.sum() >= 2:
+                freqs, fields = freqs[mask], fields[mask]
+        except Exception:
+            pass
+
+    # One boundary field per frequency (average any duplicate frequencies),
+    # sorted ascending in frequency for interpolation.
+    uniq_f, inverse = np.unique(freqs, return_inverse=True)
+    if uniq_f.size < 2:
+        return None
+    sums = np.zeros_like(uniq_f, dtype=float)
+    counts = np.zeros_like(uniq_f, dtype=float)
+    np.add.at(sums, inverse, fields)
+    np.add.at(counts, inverse, 1.0)
+    boundary = sums / counts - margin
+
+    return ReferenceFieldCutoff(freqs=uniq_f, fields=boundary)
+
+
 def compute_peaks(result: ProcessedDataset, num_peaks: int,
                    max_gaps: Optional[Sequence[float]] = None,
-                   max_field: Optional[float] = None) -> PeakResult:
+                   max_field: Optional[float] = None,
+                   max_field_by_freq: Optional[Sequence[float]] = None) -> PeakResult:
     """Run peak detection over every frequency in a processed dataset.
 
     Parameters
@@ -177,8 +239,15 @@ def compute_peaks(result: ProcessedDataset, num_peaks: int,
         ``num_peaks - 1``). Peaks farther than their limit are treated as
         noise and overlapped onto peak 1. ``None`` disables gap filtering.
     max_field : float, optional
-        If given, peaks above this field are ignored; only peaks at or
-        below ``max_field`` are detected, plotted, and used for fitting.
+        Constant field cutoff: peaks above this field are ignored; only
+        peaks at or below ``max_field`` are detected, plotted, and used for
+        fitting.
+    max_field_by_freq : sequence of float, optional
+        Per-frequency field cutoff aligned with ``result.sorted_frequencies``
+        (e.g. from a background :class:`ReferenceFieldCutoff`). Combined
+        with ``max_field`` by taking the smaller (more restrictive) of the
+        two at each frequency. ``None`` disables it. This is independent of
+        the constant ``max_field`` feature.
     """
     peak_result = PeakResult(label=result.label, num_peaks=num_peaks)
 
@@ -205,8 +274,17 @@ def compute_peaks(result: ProcessedDataset, num_peaks: int,
     for i, freq in enumerate(result.sorted_frequencies):
         H = result.H_field_by_freq[freq]
         sig = result.processed[freq]
+
+        # Effective cutoff for this frequency: the more restrictive of the
+        # constant cutoff and the per-frequency (background reference) one.
+        mf = max_field
+        if max_field_by_freq is not None and i < len(max_field_by_freq):
+            v = max_field_by_freq[i]
+            if v is not None and np.isfinite(v):
+                mf = v if mf is None else min(mf, v)
+
         fields, heights = find_peak_positions(H, sig, num_peaks, max_gaps=max_gaps,
-                                              max_field=max_field)
+                                              max_field=mf)
         peak_fields[:, i] = fields
         peak_heights[:, i] = heights
         if np.any(np.isnan(fields)):
@@ -229,6 +307,11 @@ def compute_peaks(result: ProcessedDataset, num_peaks: int,
         peak_result.warnings.append(
             f"No peaks were found at or below the field cutoff ({max_field:g}); "
             f"try raising it or disabling the field limit."
+        )
+    if max_field_by_freq is not None and np.all(np.isnan(peak_fields)):
+        peak_result.warnings.append(
+            "No peaks were found below the background reference cutoff; "
+            "try a smaller margin or a different reference dataset."
         )
     if n_overlapped:
         peak_result.warnings.append(

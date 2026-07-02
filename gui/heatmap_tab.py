@@ -30,6 +30,7 @@ class HeatmapTab(QWidget):
         self.app_state = app_state
         self._build_ui()
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
+        self.app_state.display_range_changed.connect(self.refresh_plot)
 
     # ------------------------------------------------------------------ UI
 
@@ -81,20 +82,6 @@ class HeatmapTab(QWidget):
         self.max_edit.setEnabled(False)
         layout.addRow("Min:", self.min_edit)
         layout.addRow("Max:", self.max_edit)
-
-        self.freq_min = QLineEdit()
-        self.freq_max = QLineEdit()
-        self.freq_min.setPlaceholderText("Auto")
-        self.freq_max.setPlaceholderText("Auto")
-        layout.addRow("Min Frequency:", self.freq_min)
-        layout.addRow("Max Frequency:", self.freq_max)
-
-        self_field_min = QLineEdit()
-        self_field_max = QLineEdit()
-        self_field_min.setPlaceholderText("Auto")
-        self_field_max.setPlaceholderText("Auto")
-        layout.addRow("Min Field:", self_field_min)
-        layout.addRow("Max Field:", self_field_max)
 
         self.interp_combo = QComboBox()
         self.interp_combo.addItems(INTERPOLATIONS)
@@ -153,7 +140,7 @@ class HeatmapTab(QWidget):
             origin="lower",
             cmap=self.colormap_combo.currentText(),
             interpolation=self.interp_combo.currentText(),
-            extent=[0, 0.2, 2, 10],
+            extent=[field_grid.min(), field_grid.max(), freqs.min(), freqs.max()],
             vmin=vmin,
             vmax=vmax,
         )
@@ -162,6 +149,9 @@ class HeatmapTab(QWidget):
         ax.set_title(f"FMR Map: {label}")
         cbar = self.canvas.figure.colorbar(im, ax=ax)
         cbar.set_label("Intensity")
+
+        # Global display ranges: x = field, y = frequency.
+        self.app_state.apply_ranges_to_axes(ax, x_kind="field", y_kind="frequency")
 
         self.canvas.figure.tight_layout()
         self.canvas.draw()

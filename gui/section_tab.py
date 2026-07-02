@@ -36,6 +36,7 @@ class _BaseSliceWidget(QWidget):
     value_range = (-1e6, 1e6)
     value_default = 0.0
     value_decimals = 4
+    x_range_kind = None  # "field" or "frequency": which global range limits the x-axis
 
     def __init__(self, app_state, parent=None):
         super().__init__(parent)
@@ -44,6 +45,7 @@ class _BaseSliceWidget(QWidget):
         self._last_series = {}
         self._build_ui()
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
+        self.app_state.display_range_changed.connect(self._apply_ranges)
 
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -132,6 +134,7 @@ class _BaseSliceWidget(QWidget):
             x_values = x  # shared axis across datasets
 
         self._finalize_axes(ax, target)
+        self.app_state.apply_ranges_to_axes(ax, x_kind=self.x_range_kind)
         ax.legend(fontsize=9)
         ax.grid(alpha=0.3)
         self.canvas.figure.tight_layout()
@@ -139,6 +142,14 @@ class _BaseSliceWidget(QWidget):
 
         self._last_x = x_values
         self._last_series = series
+
+    def _apply_ranges(self):
+        """Re-apply the global display ranges to the current slice axes."""
+        axes = self.canvas.figure.axes
+        if not axes:
+            return
+        self.app_state.apply_ranges_to_axes(axes[0], x_kind=self.x_range_kind)
+        self.canvas.draw()
 
     def _export(self):
         if self._last_x is None or not self._last_series:
@@ -177,6 +188,7 @@ class FrequencySliceWidget(_BaseSliceWidget):
     """Sub-tab A: extract Signal vs Magnetic Field at a chosen frequency."""
 
     x_label = "field"
+    x_range_kind = "field"
     value_label = "Frequency"
     value_suffix = " (GHz)"
     value_range = (0.0, 1000.0)
@@ -197,6 +209,7 @@ class FieldSliceWidget(_BaseSliceWidget):
     """Sub-tab B: extract Signal vs Frequency at a chosen magnetic field."""
 
     x_label = "frequency_GHz"
+    x_range_kind = "frequency"
     value_label = "Field"
     value_suffix = ""
     value_range = (-1e6, 1e6)

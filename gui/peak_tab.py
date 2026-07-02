@@ -31,7 +31,9 @@ from PyQt5.QtWidgets import (
 import matplotlib.pyplot as plt
 
 from plotting.mpl_canvas import MplCanvas
-from processing.peak_analysis import DEFAULT_MAX_GAP, compute_peaks, validate_num_peaks
+from processing.peak_analysis import (
+    DEFAULT_MAX_GAP, build_reference_field_curve, compute_peaks, validate_num_peaks,
+)
 from processing.curve_fitting import (
     DEFAULT_MODEL_KEY, FIT_MODELS, FIT_MODELS_BY_KEY, fit_peak_result, format_fit,
 )
@@ -50,10 +52,17 @@ class PeakTab(QWidget):
         self._last_peak_results = {}  # label -> PeakResult, from the most recent "Find Peaks" run
         self._last_fits = {}          # label -> DatasetFit, from the most recent "Fit Peaks" run
         self._last_max_field = None   # field cutoff used in the most recent run (or None)
+        self._last_ref_cutoff = None  # background ReferenceFieldCutoff used (or None)
         self._gap_spinboxes = []  # one QDoubleSpinBox per peak beyond the first
         self._build_ui()
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
         self._rebuild_gap_settings(self.num_peaks_spin.value())
+        self.app_state.display_range_changed.connect(self._reapply_display_ranges)
+
+    def _reapply_display_ranges(self):
+        """Re-render the current peak plot so the new global ranges apply."""
+        if self._last_peak_results:
+            self._render(self._last_peak_results, self._last_fits)
 
     # ------------------------------------------------------------------ UI
 
@@ -63,6 +72,7 @@ class PeakTab(QWidget):
         controls = QVBoxLayout()
         controls.addWidget(self._build_dataset_group())
         controls.addWidget(self._build_settings_group())
+        controls.addWidget(self._build_reference_group())
         controls.addWidget(self._build_gap_group())
         controls.addWidget(self._build_fit_group())
         controls.addStretch(1)
@@ -131,6 +141,52 @@ class PeakTab(QWidget):
         layout.addRow(export_btn)
 
         return group
+
+    def _build_reference_group(self) -> QGroupBox:
+        """Separate, per-frequency field cutoff derived from a *background*
+        dataset's peak track: at each frequency, only peaks below the
+        background peak's field (minus a margin) are detected. Independent
+        of the constant Max Field cutoff in the Peak Detection group.
+        """
+        group = QGroupBox("Background Reference Cutoff (per-frequency)")
+        layout = QFormLayout(group)
+
+        self.ref_cutoff_checkbox = QCheckBox("Use background reference cutoff")
+        self.ref_cutoff_checkbox.setChecked(False)
+        self.ref_cutoff_checkbox.toggled.connect(self._on_ref_cutoff_toggled)
+        layout.addRow(self.ref_cutoff_checkbox)
+
+        self.ref_dataset_combo = QComboBox()
+        self.ref_dataset_combo.setEnabled(False)
+        self.ref_dataset_combo.setToolTip(
+            "Dataset whose peak track defines the per-frequency field ceiling "
+            "(e.g. a background/reference measurement).")
+        layout.addRow("Background dataset:", self.ref_dataset_combo)
+
+        self.ref_peak_spin = QSpinBox()
+        self.ref_peak_spin.setRange(1, 50)
+        self.ref_peak_spin.setValue(1)
+        self.ref_peak_spin.setEnabled(False)
+        self.ref_peak_spin.setToolTip("Which peak of the background dataset to use as the boundary.")
+        layout.addRow("Reference peak #:", self.ref_peak_spin)
+
+        self.ref_margin_spin = QDoubleSpinBox()
+        self.ref_margin_spin.setRange(0.0, 1e6)
+        self.ref_margin_spin.setDecimals(5)
+        self.ref_margin_spin.setSingleStep(0.005)
+        self.ref_margin_spin.setValue(0.0)
+        self.ref_margin_spin.setEnabled(False)
+        self.ref_margin_spin.setToolTip(
+            "Subtracted from the background field so sample peaks are searched "
+            "strictly below the background boundary.")
+        layout.addRow("Margin below (T):", self.ref_margin_spin)
+
+        return group
+
+    def _on_ref_cutoff_toggled(self, checked):
+        for w in ("ref_dataset_combo", "ref_peak_spin", "ref_margin_spin"):
+            if hasattr(self, w):
+                getattr(self, w).setEnabled(checked)
 
     def _build_gap_group(self) -> QGroupBox:
         """Group holding the per-peak 'max allowed gap from Peak 1'
@@ -289,6 +345,18 @@ class PeakTab(QWidget):
             item.setCheckState(Qt.Checked if should_check else Qt.Unchecked)
             self.dataset_list.addItem(item)
 
+        # Keep the background-reference dataset dropdown in sync, preserving
+        # the current selection where possible.
+        if hasattr(self, "ref_dataset_combo"):
+            prev = self.ref_dataset_combo.currentText()
+            self.ref_dataset_combo.blockSignals(True)
+            self.ref_dataset_combo.clear()
+            self.ref_dataset_combo.addItems(self.app_state.processed_labels())
+            idx = self.ref_dataset_combo.findText(prev)
+            if idx >= 0:
+                self.ref_dataset_combo.setCurrentIndex(idx)
+            self.ref_dataset_combo.blockSignals(False)
+
     def _checked_labels(self):
         return [
             self.dataset_list.item(i).text()
@@ -312,19 +380,44 @@ class PeakTab(QWidget):
         max_gaps = self._current_max_gaps() if self.gap_enabled_checkbox.isChecked() else None
         max_field = self.max_field_spin.value() if self.max_field_checkbox.isChecked() else None
 
+        # Optional per-frequency cutoff from a background reference dataset.
+        ref_cutoff = None
+        if self.ref_cutoff_checkbox.isChecked():
+            bg_label = self.ref_dataset_combo.currentText()
+            bg_proc = self.app_state.get_processed(bg_label) if bg_label else None
+            if bg_proc is None:
+                QMessageBox.warning(self, "Background reference",
+                                     "Select a valid background dataset for the reference cutoff.")
+                return
+            ref_peak_idx = self.ref_peak_spin.value() - 1
+            margin = self.ref_margin_spin.value()
+            bg_result = compute_peaks(bg_proc, max(num_peaks, ref_peak_idx + 1),
+                                      max_gaps=None)
+            ref_cutoff = build_reference_field_curve(
+                bg_result, peak_index=ref_peak_idx, margin=margin)
+            if ref_cutoff is None:
+                QMessageBox.warning(
+                    self, "Background reference",
+                    f"Could not build a reference boundary from '{bg_label}' "
+                    f"(peak {ref_peak_idx + 1}). It may have too few detected points.")
+                return
+
         results = {}
         all_warnings = []
         for label in labels:
             processed = self.app_state.get_processed(label)
             if processed is None:
                 continue
+            mfbf = (ref_cutoff.fields_for(processed.sorted_frequencies)
+                    if ref_cutoff is not None else None)
             peak_result = compute_peaks(processed, num_peaks, max_gaps=max_gaps,
-                                        max_field=max_field)
+                                        max_field=max_field, max_field_by_freq=mfbf)
             results[label] = peak_result
             all_warnings.extend(f"[{label}] {w}" for w in peak_result.warnings)
 
         self._last_peak_results = results
         self._last_max_field = max_field
+        self._last_ref_cutoff = ref_cutoff
         # Re-finding peaks invalidates any previous fit.
         self._last_fits = {}
         self.fit_results_text.clear()
@@ -381,6 +474,15 @@ class PeakTab(QWidget):
             ax.axvline(self._last_max_field, color="0.5", linestyle=":",
                        linewidth=1.5, zorder=1,
                        label=f"field cutoff = {self._last_max_field:g}")
+
+        ref = getattr(self, "_last_ref_cutoff", None)
+        if ref is not None and getattr(ref, "freqs", None) is not None and ref.freqs.size:
+            # Boundary is field(freq); plot field on x, frequency on y.
+            ax.plot(ref.fields, ref.freqs, color="0.4", linestyle="--",
+                    linewidth=1.5, zorder=1, label="background reference cutoff")
+
+        # Global display ranges: x = field, y = frequency.
+        self.app_state.apply_ranges_to_axes(ax, x_kind="field", y_kind="frequency")
 
         ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
