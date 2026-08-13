@@ -139,9 +139,11 @@ class ExportTab(QWidget):
 
         field_grid, freqs, matrix = result.as_matrix()
         fig, ax = plt.subplots(figsize=(8, 6))
+        fscale = self.app_state.field_scale()
         im = ax.imshow(matrix, aspect="auto", origin="lower", cmap="RdYlBu_r",
-                        extent=[field_grid.min(), field_grid.max(), freqs.min(), freqs.max()])
-        ax.set_xlabel("Magnetic Field")
+                        extent=[field_grid.min() * fscale, field_grid.max() * fscale,
+                                freqs.min(), freqs.max()])
+        ax.set_xlabel(self.app_state.field_axis_label())
         ax.set_ylabel("Frequency (GHz)")
         ax.set_title(f"FMR Map: {label}")
         fig.colorbar(im, ax=ax, label="Intensity")

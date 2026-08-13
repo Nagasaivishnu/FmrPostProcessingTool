@@ -46,6 +46,8 @@ class AppState(QObject):
     processed_changed = pyqtSignal()
     # Emitted whenever the global display ranges (frequency/field) change.
     display_range_changed = pyqtSignal()
+    # Emitted whenever the magnetic-field display unit changes (T <-> Oe).
+    field_unit_changed = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -59,8 +61,14 @@ class AppState(QObject):
 
         # Global display ranges shared by every tab's plots. ``None`` means
         # "auto" (let Matplotlib pick). Each is a (min, max) tuple.
+        # Field-range values are entered/stored in Tesla.
         self.freq_range: Optional[Tuple[float, float]] = None
         self.field_range: Optional[Tuple[float, float]] = None
+
+        # Magnetic-field display unit. Raw data is in Tesla; when set to
+        # "Oe", every plotted field value is multiplied by 1e4 for display
+        # (data, inputs, and exports remain in Tesla).
+        self.field_unit: str = "T"
 
         # label -> ProcessedDataset
         self.processed: Dict[str, ProcessedDataset] = {}
@@ -91,12 +99,36 @@ class AppState(QObject):
     def processed_labels(self) -> List[str]:
         return list(self.processed.keys())
 
+    # --- Field display unit -------------------------------------------------------
+
+    def set_field_unit(self, unit: str) -> None:
+        """Set the magnetic-field display unit ("T" or "Oe") and notify all
+        tabs. Raw data stays in Tesla; conversion happens at plot time.
+        """
+        unit = "Oe" if str(unit).lower().startswith("oe") else "T"
+        if unit != self.field_unit:
+            self.field_unit = unit
+            self.field_unit_changed.emit()
+
+    def field_scale(self) -> float:
+        """Multiplier applied to Tesla field values for display
+        (1.0 for T, 1e4 for Oe).
+        """
+        return 1.0e4 if self.field_unit == "Oe" else 1.0
+
+    def field_unit_label(self) -> str:
+        return self.field_unit
+
+    def field_axis_label(self) -> str:
+        return f"Magnetic Field ({self.field_unit})"
+
     # --- Global display ranges ---------------------------------------------------
 
     def set_display_ranges(self, freq_range: Optional[Tuple[float, float]],
                            field_range: Optional[Tuple[float, float]]) -> None:
         """Set the shared frequency/field display ranges (each a (min, max)
-        tuple or ``None`` for auto) and notify all tabs.
+        tuple or ``None`` for auto) and notify all tabs. Field values are
+        in Tesla.
         """
         self.freq_range = freq_range
         self.field_range = field_range
@@ -107,9 +139,13 @@ class AppState(QObject):
         """Apply the shared ranges to a Matplotlib Axes. ``x_kind``/``y_kind``
         say what quantity each axis represents: ``"field"``, ``"frequency"``,
         or ``None`` (leave that axis alone). Ranges that are ``None`` (auto)
-        are skipped.
+        are skipped. Field limits (stored in Tesla) are converted to the
+        current display unit, matching the plotted (scaled) data.
         """
-        ranges = {"field": self.field_range, "frequency": self.freq_range}
+        s = self.field_scale()
+        field_r = (self.field_range[0] * s, self.field_range[1] * s) \
+            if self.field_range is not None else None
+        ranges = {"field": field_r, "frequency": self.freq_range}
         xr = ranges.get(x_kind)
         if xr is not None:
             ax.set_xlim(xr[0], xr[1])

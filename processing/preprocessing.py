@@ -26,6 +26,14 @@ class PreprocessSettings:
     into :func:`preprocess_trace`.
     """
 
+    # --- Raw-data lineshape fit (derivative Lorentzian) ---
+    # When enabled, each frequency's raw trace is replaced by a multi-peak
+    # derivative-Lorentzian fit before any other processing step; traces
+    # that cannot be fitted become zeros. For N requested peaks, models
+    # with 1..N+1 peaks are tried and the minimum-error one is kept.
+    use_lineshape_fit: bool = False
+    lineshape_num_peaks: int = 1
+
     # --- Background processing ---
     use_background: bool = False
     background_method: str = "direct"  # "direct" | "normalized" | "division"

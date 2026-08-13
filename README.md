@@ -37,7 +37,32 @@ python main.py
    on one dataset/frequency; **Process All Datasets** runs the full pipeline
    over everything loaded in Tab 1.
 
-   **Display Ranges (applied to all tabs)**: tick **Limit frequency range**
+   **Raw-Data Lineshape Fit (derivative Lorentzian)** — controls above the
+   preview graph. When **Enable fit on raw data** is ticked, every
+   frequency's raw trace is fitted with a sum of derivative-Lorentzian
+   peaks (each peak: antisymmetric dL/dH + symmetric dispersive-derivative
+   component, resonance field and half-width, plus a global linear
+   baseline), and the fitted curve replaces the raw data for all
+   subsequent processing steps. Traces that cannot be fitted are replaced
+   with zeros (with a warning). **Number of Peaks** is the requested peak
+   count N; models with 1..N+1 peaks are all fitted and the minimum-error
+   one is used (so N = 3 tries 1, 2, 3 and 4 peaks). Fitting uses
+   physically seeded, variable-projection-initialised, multi-start bounded
+   least squares with an analytic Jacobian and a robust first stage, to
+   minimise the error against the data. Pick a **Preview frequency** and
+   click **Preview Fit** to see raw data vs the fitted curve (with chosen
+   peak count and R²) at that frequency without running the rest of the
+   pipeline; **Preview Processing** also honors the selected frequency and
+   shows the fully processed trace.
+
+   **Display Ranges (applied to all tabs)**: a **Field Unit** selector
+   (Tesla or Oersted) sets the magnetic-field display unit for every
+   plot's field axis. Raw data is in Tesla; choosing Oe multiplies the
+   displayed field values by 10000 (1 T = 10000 Oe) on the Heatmap, both
+   Section slices, the Peak Analysis plot, the exported figure, and the
+   processing previews — axis labels update accordingly. All numeric
+   inputs (Max Field, gaps, margins, field display range) and data
+   exports remain in Tesla. Below it, tick **Limit frequency range**
    and/or **Limit field range** and set the min/max. These are global
    axis limits shared by every tab's plots — the Heatmap, both Section
    slices, the Peak Analysis plot, the exported heatmap figure, and this

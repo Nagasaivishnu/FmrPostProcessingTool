@@ -46,6 +46,7 @@ class _BaseSliceWidget(QWidget):
         self._build_ui()
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
         self.app_state.display_range_changed.connect(self._apply_ranges)
+        self.app_state.field_unit_changed.connect(self._on_unit_changed)
 
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -129,7 +130,8 @@ class _BaseSliceWidget(QWidget):
             x, y, actual = self._slice(result, target)
             if x is None:
                 continue
-            ax.plot(x, y, marker="o", markersize=3, linewidth=1.5, label=f"{label}")
+            x_plot = x * self.app_state.field_scale() if self.x_range_kind == "field" else x
+            ax.plot(x_plot, y, marker="o", markersize=3, linewidth=1.5, label=f"{label}")
             series[label] = y
             x_values = x  # shared axis across datasets
 
@@ -142,6 +144,12 @@ class _BaseSliceWidget(QWidget):
 
         self._last_x = x_values
         self._last_series = series
+
+    def _on_unit_changed(self):
+        """Re-extract the current slice so the field axis is re-scaled to
+        the new display unit (no-op if nothing has been extracted yet)."""
+        if self._last_series:
+            self.extract()
 
     def _apply_ranges(self):
         """Re-apply the global display ranges to the current slice axes."""
@@ -200,7 +208,7 @@ class FrequencySliceWidget(_BaseSliceWidget):
         return H, sig, actual_freq
 
     def _finalize_axes(self, ax, target):
-        ax.set_xlabel("Magnetic Field")
+        ax.set_xlabel(self.app_state.field_axis_label())
         ax.set_ylabel("Signal")
         ax.set_title(f"Frequency Slice near {target:g} GHz")
 

@@ -31,6 +31,7 @@ class HeatmapTab(QWidget):
         self._build_ui()
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
         self.app_state.display_range_changed.connect(self.refresh_plot)
+        self.app_state.field_unit_changed.connect(self.refresh_plot)
 
     # ------------------------------------------------------------------ UI
 
@@ -140,15 +141,18 @@ class HeatmapTab(QWidget):
             origin="lower",
             cmap=self.colormap_combo.currentText(),
             interpolation=self.interp_combo.currentText(),
-            extent=[field_grid.min(), field_grid.max(), freqs.min(), freqs.max()],
+            extent=[field_grid.min() * self.app_state.field_scale(),
+                    field_grid.max() * self.app_state.field_scale(),
+                    freqs.min(), freqs.max()],
             vmin=vmin,
             vmax=vmax,
         )
-        ax.set_xlabel("Magnetic Field")
-        ax.set_ylabel("Frequency (GHz)")
-        ax.set_title(f"FMR Map: {label}")
+        ax.set_xlabel(self.app_state.field_axis_label(), fontsize=15)
+        ax.set_ylabel("Frequency (GHz)", fontsize=15)
+        ax.set_title(f"FMR Map: {label}", fontsize=15)
         cbar = self.canvas.figure.colorbar(im, ax=ax)
-        cbar.set_label("Intensity")
+        cbar.set_label("Intensity", fontsize=15)
+        ax.tick_params(axis='both', which='major', labelsize=16)
 
         # Global display ranges: x = field, y = frequency.
         self.app_state.apply_ranges_to_axes(ax, x_kind="field", y_kind="frequency")

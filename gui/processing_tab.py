@@ -34,6 +34,7 @@ class ProcessingTab(QWidget):
         self.app_state = app_state
         self._build_ui()
         self.app_state.display_range_changed.connect(self._apply_ranges_to_preview)
+        self.app_state.datasets_changed.connect(self._refresh_preview_freq_combo)
 
     # ------------------------------------------------------------------ UI
 
@@ -54,12 +55,82 @@ class ProcessingTab(QWidget):
         left_widget.setMaximumWidth(420)
 
         right = QVBoxLayout()
-        right.addWidget(QLabel("Preview (first loaded dataset, first frequency)"))
+        right.addWidget(self._build_lineshape_group())
+        self.preview_label = QLabel("Preview (first loaded dataset)")
+        right.addWidget(self.preview_label)
         self.preview_canvas = MplCanvas(figsize=(6, 4.5))
         right.addWidget(self.preview_canvas)
 
         root.addWidget(left_widget)
         root.addLayout(right, stretch=1)
+
+    def _build_lineshape_group(self) -> QGroupBox:
+        """Controls (shown above the preview graph) for the optional
+        raw-data lineshape fit: each frequency's raw trace is fitted with a
+        sum of derivative-Lorentzian peaks and the fitted curve replaces the
+        raw data for every subsequent processing step. Traces that cannot
+        be fitted become zeros. For N requested peaks, models with 1..N+1
+        peaks are tried and the minimum-error fit is kept.
+        """
+        group = QGroupBox("Raw-Data Lineshape Fit (derivative Lorentzian)")
+        row = QHBoxLayout(group)
+
+        self.lineshape_checkbox = QCheckBox("Enable fit on raw data")
+        self.lineshape_checkbox.toggled.connect(self._sync_settings)
+        row.addWidget(self.lineshape_checkbox)
+
+        row.addWidget(QLabel("Number of Peaks:"))
+        self.lineshape_peaks_spin = QSpinBox()
+        self.lineshape_peaks_spin.setRange(1, 10)
+        self.lineshape_peaks_spin.setValue(1)
+        self.lineshape_peaks_spin.setToolTip(
+            "N peaks requested; models with 1..N+1 peaks are fitted and the "
+            "minimum-error one is used.")
+        self.lineshape_peaks_spin.valueChanged.connect(self._sync_settings)
+        row.addWidget(self.lineshape_peaks_spin)
+
+        row.addWidget(QLabel("Preview frequency:"))
+        self.preview_freq_combo = QComboBox()
+        self.preview_freq_combo.setMinimumWidth(110)
+        self.preview_freq_combo.setToolTip(
+            "Frequency shown by 'Preview Fit' and 'Preview Processing'.")
+        row.addWidget(self.preview_freq_combo)
+
+        preview_fit_btn = QPushButton("Preview Fit")
+        preview_fit_btn.setToolTip(
+            "Fit only the selected frequency and overlay raw data vs fitted "
+            "curve (fast; does not run the rest of the pipeline).")
+        preview_fit_btn.clicked.connect(self._preview_fit)
+        row.addWidget(preview_fit_btn)
+
+        row.addStretch(1)
+        return group
+
+    def _refresh_preview_freq_combo(self):
+        """Populate the preview-frequency dropdown from the first loaded
+        dataset, preserving the current selection where possible.
+        """
+        entry = next((e for e in self.app_state.experiments if e.dataset is not None), None)
+        prev = self.preview_freq_combo.currentText()
+        self.preview_freq_combo.blockSignals(True)
+        self.preview_freq_combo.clear()
+        if entry is not None:
+            for f in entry.dataset.sorted_frequencies:
+                self.preview_freq_combo.addItem(f"{f:g}", f)
+            idx = self.preview_freq_combo.findText(prev)
+            if idx >= 0:
+                self.preview_freq_combo.setCurrentIndex(idx)
+        self.preview_freq_combo.blockSignals(False)
+
+    def _selected_preview_freq(self, result_or_dataset):
+        """The frequency chosen in the dropdown, or the first available."""
+        data = self.preview_freq_combo.currentData()
+        freqs = list(result_or_dataset.sorted_frequencies)
+        if not freqs:
+            return None
+        if data is None:
+            return freqs[0]
+        return min(freqs, key=lambda f: abs(f - float(data)))
 
     def _build_background_group(self) -> QGroupBox:
         group = QGroupBox("A. Background Processing")
@@ -171,6 +242,15 @@ class ProcessingTab(QWidget):
         group = QGroupBox("E. Display Ranges (applied to all tabs)")
         layout = QFormLayout(group)
 
+        self.field_unit_combo = QComboBox()
+        self.field_unit_combo.addItems(["Tesla (T)", "Oersted (Oe)"])
+        self.field_unit_combo.setToolTip(
+            "Magnetic-field display unit for every plot's field axis. Raw "
+            "data is in Tesla; selecting Oe multiplies displayed field "
+            "values by 10000. Inputs and data exports stay in Tesla.")
+        self.field_unit_combo.currentIndexChanged.connect(self._on_field_unit_changed)
+        layout.addRow("Field Unit:", self.field_unit_combo)
+
         self.freq_range_checkbox = QCheckBox("Limit frequency range (GHz)")
         self.freq_range_checkbox.toggled.connect(self._on_display_range_changed)
         layout.addRow(self.freq_range_checkbox)
@@ -212,6 +292,10 @@ class ProcessingTab(QWidget):
         layout.addRow("Max Field:", self.field_max_spin)
 
         return group
+
+    def _on_field_unit_changed(self, *_args):
+        unit = "Oe" if "Oe" in self.field_unit_combo.currentText() else "T"
+        self.app_state.set_field_unit(unit)
 
     def _on_display_range_changed(self, *_args):
         """Enable/disable the spinboxes to match their checkboxes, push the
@@ -269,6 +353,9 @@ class ProcessingTab(QWidget):
         s.savgol_window = self.savgol_window_spin.value()
         s.savgol_polyorder = self.savgol_poly_spin.value()
 
+        s.use_lineshape_fit = self.lineshape_checkbox.isChecked()
+        s.lineshape_num_peaks = self.lineshape_peaks_spin.value()
+
         if self.enhance_checkbox.isChecked():
             s.enhance_method = self.enhance_combo.currentText().lower()
         else:
@@ -309,20 +396,76 @@ class ProcessingTab(QWidget):
             QMessageBox.information(self, "No data", "Load at least one experimental dataset in Tab 1 first.")
             return
 
-        result = process_dataset(entry.dataset, self.app_state.settings)
-        if not result.sorted_frequencies:
-            QMessageBox.warning(self, "Preview failed", "No frequencies could be processed.")
+        if not entry.dataset.sorted_frequencies:
+            QMessageBox.warning(self, "Preview failed", "The dataset has no frequencies.")
             return
 
-        freq = result.sorted_frequencies[0]
-        H, sig, _ = result.field_slice_at_frequency(freq)
+        # Process only the selected frequency (instant even when the
+        # raw-data lineshape fit is enabled).
+        from processing.dataset_processor import process_record
+        freq = self._selected_preview_freq(entry.dataset)
+        record = entry.dataset.records[freq]
+        try:
+            sig, warning = process_record(record, self.app_state.settings)
+        except Exception as exc:
+            QMessageBox.warning(self, "Preview failed", str(exc))
+            return
+        H = record.H_field * self.app_state.field_scale()
 
         self.preview_canvas.figure.clear()
         ax = self.preview_canvas.figure.add_subplot(111)
         ax.plot(H, sig, color="#3366cc")
-        ax.set_xlabel("Magnetic Field")
+        ax.set_xlabel(self.app_state.field_axis_label())
         ax.set_ylabel(self.app_state.settings.output_quantity.replace("_", " ").title())
-        ax.set_title(f"{entry.label} @ {freq:g} GHz (preview)")
+        title = f"{entry.label} @ {freq:g} GHz (preview)"
+        if warning:
+            title += f"\n{warning}"
+        ax.set_title(title, fontsize=10)
+        ax.grid(alpha=0.3)
+        self.app_state.apply_ranges_to_axes(ax, x_kind="field")
+        self.preview_canvas.figure.tight_layout()
+        self.preview_canvas.draw()
+
+    def _preview_fit(self):
+        """Fit ONLY the selected frequency's raw trace with the multi-peak
+        derivative-Lorentzian model and overlay raw data vs fitted curve.
+        Fast tuning aid: doesn't run the rest of the pipeline.
+        """
+        self._sync_settings()
+        entry = next((e for e in self.app_state.experiments if e.dataset is not None), None)
+        if entry is None:
+            QMessageBox.information(self, "No data",
+                                     "Load at least one experimental dataset in Tab 1 first.")
+            return
+        if not entry.dataset.sorted_frequencies:
+            QMessageBox.warning(self, "Preview failed", "The dataset has no frequencies.")
+            return
+
+        from processing.dataset_processor import select_primary_signal
+        from processing.lineshape_fitting import fit_best_lineshape
+
+        freq = self._selected_preview_freq(entry.dataset)
+        record = entry.dataset.records[freq]
+        raw = select_primary_signal(record)
+        fit = fit_best_lineshape(record.H_field, raw,
+                                 self.lineshape_peaks_spin.value())
+
+        Hplot = record.H_field * self.app_state.field_scale()
+        self.preview_canvas.figure.clear()
+        ax = self.preview_canvas.figure.add_subplot(111)
+        ax.plot(Hplot, raw, ".", markersize=3, color="0.5", label="raw data")
+        if fit.success:
+            ax.plot(Hplot, fit.fitted, "-", color="#cc3333", linewidth=1.8,
+                    label=f"fit ({fit.n_peaks} peak(s), R\u00b2 = {fit.r_squared:.4f})")
+            title = f"{entry.label} @ {freq:g} GHz - lineshape fit"
+        else:
+            ax.plot(Hplot, fit.fitted, "-", color="#cc3333", linewidth=1.8,
+                    label="fit failed -> zeros")
+            title = f"{entry.label} @ {freq:g} GHz - fit failed ({fit.message})"
+        ax.set_xlabel(self.app_state.field_axis_label())
+        ax.set_ylabel("Raw Signal")
+        ax.set_title(title)
+        ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
         self.app_state.apply_ranges_to_axes(ax, x_kind="field")
         self.preview_canvas.figure.tight_layout()

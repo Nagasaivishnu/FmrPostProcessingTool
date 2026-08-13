@@ -58,6 +58,7 @@ class PeakTab(QWidget):
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
         self._rebuild_gap_settings(self.num_peaks_spin.value())
         self.app_state.display_range_changed.connect(self._reapply_display_ranges)
+        self.app_state.field_unit_changed.connect(self._reapply_display_ranges)
 
     def _reapply_display_ranges(self):
         """Re-render the current peak plot so the new global ranges apply."""
@@ -438,6 +439,7 @@ class PeakTab(QWidget):
 
         overlay = fits and self.fit_overlay_checkbox.isChecked()
         color_cycle = itertools.cycle(plt.rcParams["axes.prop_cycle"].by_key()["color"])
+        fscale = self.app_state.field_scale()  # field display unit (T -> Oe)
 
         for label, peak_result in results.items():
             color = next(color_cycle)
@@ -446,7 +448,7 @@ class PeakTab(QWidget):
                 if len(freqs) == 0:
                     continue
                 linestyle = _LINESTYLES[peak_idx % len(_LINESTYLES)]
-                ax.plot(fields, freqs, linestyle=linestyle, marker="o", markersize=3,
+                ax.plot(fields * fscale, freqs, linestyle=linestyle, marker="o", markersize=3,
                         linewidth=1.2, color=color, alpha=0.85,
                         label=f"{label} - Peak {peak_idx + 1}")
 
@@ -454,16 +456,16 @@ class PeakTab(QWidget):
                 rejected_labeled = False
                 for pf in fits[label].peak_fits:
                     if pf.success and pf.H_fit.size:
-                        ax.plot(pf.H_fit, pf.f_fit, linestyle="-", linewidth=2.2,
+                        ax.plot(pf.H_fit * fscale, pf.f_fit, linestyle="-", linewidth=2.2,
                                 color=color, alpha=0.95, zorder=5,
                                 label=f"{label} - Peak {pf.peak_index + 1} fit")
                     if getattr(pf, "H_out", None) is not None and pf.H_out.size:
-                        ax.plot(pf.H_out, pf.f_out, linestyle="none", marker="x",
+                        ax.plot(pf.H_out * fscale, pf.f_out, linestyle="none", marker="x",
                                 markersize=5, color="0.6", alpha=0.6, zorder=2,
                                 label="rejected (outliers)" if not rejected_labeled else None)
                         rejected_labeled = True
 
-        ax.set_xlabel("Peak Field Position")
+        ax.set_xlabel(f"Peak Field Position ({self.app_state.field_unit_label()})")
         ax.set_ylabel("Frequency (GHz)")
         title = "Peak Position vs Frequency"
         if overlay:
@@ -471,14 +473,15 @@ class PeakTab(QWidget):
         ax.set_title(title)
 
         if getattr(self, "_last_max_field", None) is not None:
-            ax.axvline(self._last_max_field, color="0.5", linestyle=":",
+            ax.axvline(self._last_max_field * fscale, color="0.5", linestyle=":",
                        linewidth=1.5, zorder=1,
-                       label=f"field cutoff = {self._last_max_field:g}")
+                       label=f"field cutoff = {self._last_max_field * fscale:g} "
+                             f"{self.app_state.field_unit_label()}")
 
         ref = getattr(self, "_last_ref_cutoff", None)
         if ref is not None and getattr(ref, "freqs", None) is not None and ref.freqs.size:
             # Boundary is field(freq); plot field on x, frequency on y.
-            ax.plot(ref.fields, ref.freqs, color="0.4", linestyle="--",
+            ax.plot(ref.fields * fscale, ref.freqs, color="0.4", linestyle="--",
                     linewidth=1.5, zorder=1, label="background reference cutoff")
 
         # Global display ranges: x = field, y = frequency.

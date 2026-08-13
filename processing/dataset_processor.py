@@ -112,9 +112,57 @@ class ProcessedDataset:
         return freqs, values, actual_field
 
 
+def select_primary_signal(record) -> np.ndarray:
+    """Pick whichever lock-in channel carries the larger swing as the
+    primary signal. This mirrors the X/Y "transform" idea from the original
+    script without baking in a specific lock-in convention.
+    """
+    if np.ptp(record.voltage_y) > np.ptp(record.voltage_x):
+        return record.voltage_y
+    return record.voltage_x
+
+
+def process_record(record, settings: PreprocessSettings):
+    """Run the full per-frequency pipeline on a single record.
+
+    Steps: channel selection -> optional raw-data lineshape fit (the fitted
+    curve replaces the raw trace; unfittable traces become zeros) ->
+    :func:`preprocessing.preprocess_trace` (background subtraction, DC,
+    detrend, Savitzky-Golay, quantity, enhancement).
+
+    Returns ``(processed_array, warning_or_None)``.
+    """
+    primary_signal = select_primary_signal(record)
+    warning = None
+
+    if settings.use_lineshape_fit:
+        from .lineshape_fitting import fit_best_lineshape
+        fit = fit_best_lineshape(record.H_field, primary_signal,
+                                 settings.lineshape_num_peaks)
+        if fit.success:
+            primary_signal = fit.fitted
+        else:
+            primary_signal = np.zeros_like(np.asarray(record.H_field, dtype=float))
+            warning = f"Lineshape fit failed ({fit.message}); trace replaced with zeros."
+
+    bg_H = None
+    bg_signal = None
+    if settings.use_background and record.bg_voltage_x is not None:
+        bg_H = record.H_field  # background interpolated onto same axis downstream
+        bg_signal = (record.bg_voltage_y
+                     if np.ptp(record.bg_voltage_y) > np.ptp(record.bg_voltage_x)
+                     else record.bg_voltage_x)
+
+    processed = preprocess_trace(
+        record.H_field, primary_signal, settings,
+        bg_H_field=bg_H, bg_signal=bg_signal,
+    )
+    return processed, warning
+
+
 def process_dataset(dataset: Dataset, settings: PreprocessSettings) -> ProcessedDataset:
-    """Run :func:`preprocessing.preprocess_trace` over every frequency in a
-    loaded :class:`loader.Dataset`, returning a :class:`ProcessedDataset`.
+    """Run the per-frequency pipeline (see :func:`process_record`) over
+    every frequency in a loaded :class:`loader.Dataset`.
     """
     result = ProcessedDataset(label=dataset.label)
     result.sorted_frequencies = list(dataset.sorted_frequencies)
@@ -122,30 +170,14 @@ def process_dataset(dataset: Dataset, settings: PreprocessSettings) -> Processed
     for freq in result.sorted_frequencies:
         record = dataset.records[freq]
 
-        # Use whichever channel carries the larger swing as the primary
-        # signal. This mirrors the X/Y "transform" idea from the original
-        # script without baking in a specific lock-in convention.
-        if np.ptp(record.voltage_y) > np.ptp(record.voltage_x):
-            primary_signal = record.voltage_y
-        else:
-            primary_signal = record.voltage_x
-
-        bg_H = None
-        bg_signal = None
-        if settings.use_background and record.bg_voltage_x is not None:
-            bg_H = record.H_field  # background interpolated onto same axis downstream
-            bg_signal = (record.bg_voltage_y
-                         if np.ptp(record.bg_voltage_y) > np.ptp(record.bg_voltage_x)
-                         else record.bg_voltage_x)
-
         try:
-            processed = preprocess_trace(
-                record.H_field, primary_signal, settings,
-                bg_H_field=bg_H, bg_signal=bg_signal,
-            )
+            processed, warning = process_record(record, settings)
         except Exception as exc:
             result.warnings.append(f"Failed to process {freq:g} GHz ({record.filename}): {exc}")
             continue
+
+        if warning:
+            result.warnings.append(f"{freq:g} GHz: {warning}")
 
         result.H_field_by_freq[freq] = record.H_field
         result.processed[freq] = processed
