@@ -127,6 +127,14 @@ class HeatmapTab(QWidget):
 
         field_grid, freqs, matrix = result.as_matrix()
 
+        if field_grid.size == 0:
+            ax.text(0.5, 0.5,
+                    "No usable field sweeps in this dataset.\n"
+                    "Every record was too short to build a field axis from.",
+                    ha="center", va="center", transform=ax.transAxes)
+            self.canvas.draw()
+            return
+
         vmin = vmax = None
         if not self.auto_scale_checkbox.isChecked():
             try:

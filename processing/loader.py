@@ -27,6 +27,17 @@ _FREQ_PATTERNS = [
     re.compile(r'([\d.]+)\s*GHz', re.IGNORECASE),
 ]
 
+# Minimum number of points for a file to count as a real field sweep.
+#
+# Aborted or interrupted acquisitions leave behind stub files holding only the
+# first few rows written before the sweep actually started - typically three
+# rows all sitting at the starting field. These are not sweeps: they carry no
+# lineshape, and letting them through poisons every dataset-wide statistic
+# downstream. Most importantly they corrupt the common field grid used to
+# build the 2D heatmap, because that grid is sized and bounded by statistics
+# taken over *all* records.
+MIN_SWEEP_POINTS = 10
+
 
 def extract_frequency(filename: str) -> Optional[float]:
     """Extract the microwave frequency (in GHz) encoded in a filename.
@@ -164,7 +175,8 @@ def _extract_columns(df: pd.DataFrame, warnings: List[str], filename: str):
     return H_field, volx, voly
 
 
-def load_dataset(directory: str, label: Optional[str] = None) -> Dataset:
+def load_dataset(directory: str, label: Optional[str] = None,
+                 min_points: int = MIN_SWEEP_POINTS) -> Dataset:
     """Load every FMR file in ``directory`` into a :class:`Dataset`.
 
     Parameters
@@ -174,10 +186,15 @@ def load_dataset(directory: str, label: Optional[str] = None) -> Dataset:
     label : str, optional
         Human readable label used in legends/exports. Defaults to the
         directory's folder name.
+    min_points : int, optional
+        Files with fewer than this many rows are treated as aborted
+        acquisitions and skipped (see :data:`MIN_SWEEP_POINTS`). Pass ``0``
+        to disable the check and load everything.
     """
     directory = Path(directory)
     label = label or directory.name
     dataset = Dataset(label=label, directory=directory)
+    skipped_short: List[tuple] = []
 
     if not directory.exists():
         dataset.warnings.append(f"Directory does not exist: {directory}")
@@ -200,6 +217,10 @@ def load_dataset(directory: str, label: Optional[str] = None) -> Dataset:
             dataset.warnings.append(f"Failed to read {fpath.name}: {exc}")
             continue
 
+        if min_points and len(H_field) < min_points:
+            skipped_short.append((freq, fpath.name, len(H_field)))
+            continue
+
         if freq in dataset.records:
             dataset.warnings.append(
                 f"Duplicate frequency {freq:g} GHz - keeping first file, "
@@ -213,6 +234,18 @@ def load_dataset(directory: str, label: Optional[str] = None) -> Dataset:
             voltage_x=volx,
             voltage_y=voly,
             filename=fpath.name,
+        )
+
+    if skipped_short:
+        # Aggregate into a single warning: an aborted run can leave hundreds
+        # of stubs behind, and one line each would bury every other message.
+        freqs = sorted(f for f, _n, _l in skipped_short)
+        rows = sorted({l for _f, _n, l in skipped_short})
+        dataset.warnings.append(
+            f"Skipped {len(skipped_short)} file(s) with fewer than {min_points} "
+            f"points (aborted sweeps, {rows[0]}-{rows[-1]} rows each), "
+            f"covering {freqs[0]:g}-{freqs[-1]:g} GHz. "
+            f"First: {skipped_short[0][1]}"
         )
 
     return dataset

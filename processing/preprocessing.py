@@ -162,11 +162,24 @@ def compute_quantity(H_field: np.ndarray, signal: np.ndarray, quantity: str) -> 
                            absorption-lineshape recovery)
     "first_derivative"  : dSignal/dH via numpy.gradient
     "second_derivative" : d2Signal/dH2 via numpy.gradient applied twice
+
+    The integral is always accumulated from low field to high field, whichever
+    direction the sweep was actually measured in. ``cumulative_trapezoid``
+    integrates in array order, so a reverse sweep (+max down to -max) would
+    otherwise anchor its zero at the high-field end and come out offset from a
+    forward sweep of the same sample by the total area under the trace - which
+    puts the two maps on different colour scales for no physical reason.
+    Derivatives need no such handling: np.gradient divides by the signed field
+    spacing, so it is already direction-correct.
     """
     if quantity == "raw":
         return signal
     elif quantity == "absorption":
         from scipy.integrate import cumulative_trapezoid
+        descending = len(H_field) > 1 and H_field[0] > H_field[-1]
+        if descending:
+            out = cumulative_trapezoid(signal[::-1], H_field[::-1], initial=0)
+            return out[::-1]
         return cumulative_trapezoid(signal, H_field, initial=0)
     elif quantity == "first_derivative":
         return np.gradient(signal, H_field)
