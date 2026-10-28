@@ -14,11 +14,19 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from processing.dataset_processor import ProcessedDataset
 from processing.loader import Dataset
 from processing.preprocessing import PreprocessSettings
+from plotting.heatmap_render import HeatmapStyle
+
+DEFAULT_HEATMAP_CMAP = "viridis"
+
+# Magnetic-field display units. Raw files are read in tesla; the value is
+# how many of that unit make 1 T (1 T = 1000 mT = 10 000 Oe).
+FIELD_UNITS = {"T": 1.0, "mT": 1.0e3, "Oe": 1.0e4}
 
 
 class ExperimentEntry:
@@ -46,6 +54,9 @@ class AppState(QObject):
     processed_changed = pyqtSignal()
     # Emitted whenever the global display ranges (frequency/field) change.
     display_range_changed = pyqtSignal()
+    # Emitted when the field unit changes; argument = new/old scale ratio
+    # (e.g. 10000.0 for T -> Oe) so tabs can rescale field-valued inputs.
+    field_unit_changed = pyqtSignal(float)
 
     def __init__(self):
         super().__init__()
@@ -54,6 +65,10 @@ class AppState(QObject):
         self.background_directory: Optional[str] = None
         self.background_dataset: Optional[Dataset] = None
         self.use_background_subtraction: bool = False
+
+        # Unit used for magnetic field everywhere in the GUI (plots, inputs,
+        # exports). Processed data are stored already converted to it.
+        self.field_unit: str = "T"
 
         self.settings = PreprocessSettings()
 
@@ -64,6 +79,15 @@ class AppState(QObject):
 
         # label -> ProcessedDataset
         self.processed: Dict[str, ProcessedDataset] = {}
+
+        # label -> Matplotlib colormap name used for that dataset's heatmap.
+        # Each folder/dataset remembers its own choice; datasets without an
+        # entry use DEFAULT_HEATMAP_CMAP.
+        self.heatmap_cmaps: Dict[str, str] = {}
+
+        # Display settings shared by every heatmap figure (screen, PNG
+        # batch save, Export tab): scaling, fonts, Origin style, aspect.
+        self.heatmap_style = HeatmapStyle()
 
     # --- Experiment list helpers -------------------------------------------------
 
@@ -91,6 +115,52 @@ class AppState(QObject):
     def processed_labels(self) -> List[str]:
         return list(self.processed.keys())
 
+    # --- Per-dataset heatmap colormaps ------------------------------------------
+
+    def get_heatmap_cmap(self, label: str) -> str:
+        return self.heatmap_cmaps.get(label, DEFAULT_HEATMAP_CMAP)
+
+    def set_heatmap_cmap(self, label: str, cmap: str) -> None:
+        if label:
+            self.heatmap_cmaps[label] = cmap
+
+    # --- Field unit ---------------------------------------------------------------
+
+    @property
+    def field_factor(self) -> float:
+        """Multiply a field in tesla by this to get the current unit."""
+        return FIELD_UNITS[self.field_unit]
+
+    def field_axis_label(self, base: str = "Magnetic Field") -> str:
+        return f"{base} ({self.field_unit})"
+
+    def apply_field_unit(self, result: ProcessedDataset) -> ProcessedDataset:
+        """Convert a freshly processed result (fields in tesla) to the
+        current unit. New arrays are made so the raw loaded data stay in T.
+        """
+        f = self.field_factor
+        if f != 1.0:
+            result.H_field_by_freq = {k: np.asarray(v, dtype=float) * f
+                                      for k, v in result.H_field_by_freq.items()}
+        return result
+
+    def set_field_unit(self, unit: str) -> None:
+        """Switch the field unit: rescale every processed dataset and the
+        field display range, then tell all tabs.
+        """
+        if unit not in FIELD_UNITS or unit == self.field_unit:
+            return
+        ratio = FIELD_UNITS[unit] / FIELD_UNITS[self.field_unit]
+        self.field_unit = unit
+        for result in self.processed.values():
+            result.H_field_by_freq = {k: np.asarray(v, dtype=float) * ratio
+                                      for k, v in result.H_field_by_freq.items()}
+        if self.field_range is not None:
+            self.field_range = (self.field_range[0] * ratio, self.field_range[1] * ratio)
+        self.field_unit_changed.emit(ratio)
+        self.processed_changed.emit()
+        self.display_range_changed.emit()
+
     # --- Global display ranges ---------------------------------------------------
 
     def set_display_ranges(self, freq_range: Optional[Tuple[float, float]],
@@ -116,3 +186,15 @@ class AppState(QObject):
         yr = ranges.get(y_kind)
         if yr is not None:
             ax.set_ylim(yr[0], yr[1])
+
+
+def rescale_field_spin(spin, ratio: float) -> None:
+    """Convert a field-valued QDoubleSpinBox to a new unit (value, range and
+    step all multiplied by ``ratio``) without firing valueChanged.
+    """
+    spin.blockSignals(True)
+    lo, hi, val = spin.minimum(), spin.maximum(), spin.value()
+    spin.setRange(lo * ratio, hi * ratio)
+    spin.setSingleStep(spin.singleStep() * ratio)
+    spin.setValue(val * ratio)
+    spin.blockSignals(False)

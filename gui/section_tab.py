@@ -12,20 +12,31 @@ Both sub-tabs let the user export the currently displayed slice.
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor, QIcon, QPixmap
 from PyQt5.QtWidgets import (
-    QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMessageBox, QPushButton, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
+# Matplotlib's default colour cycle ("tab10"). Plotted datasets take these
+# in the order they were added to the Plotted column.
+DEFAULT_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+]
+
+import numpy as np
+
+from gui.app_state import rescale_field_spin
 from plotting.mpl_canvas import MplCanvas
-from utils.exporters import export_slice
+from utils.exporters import export_slices_xy
 
 
 class _BaseSliceWidget(QWidget):
     """Shared scaffolding for the Frequency-Slice and Field-Slice sub-tabs:
-    a dataset checklist (multi-select), a value spinbox, Extract + Export
+    two dataset columns (Available -> Plotted, plotted in the order added,
+    coloured by the default colour cycle), a value spinbox, Extract + Export
     buttons, and a plot canvas. Subclasses implement the actual slicing
     and axis labelling.
     """
@@ -46,6 +57,7 @@ class _BaseSliceWidget(QWidget):
         self._build_ui()
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
         self.app_state.display_range_changed.connect(self._apply_ranges)
+        self.app_state.field_unit_changed.connect(self._on_field_unit_changed)
 
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -53,10 +65,57 @@ class _BaseSliceWidget(QWidget):
         controls = QVBoxLayout()
 
         group = QGroupBox("Datasets")
-        group_layout = QVBoxLayout(group)
-        self.dataset_list = QListWidget()
-        self.dataset_list.setSelectionMode(QListWidget.NoSelection)
-        group_layout.addWidget(self.dataset_list)
+        group_layout = QHBoxLayout(group)
+
+        # Left column: every processed dataset not yet added to the plot.
+        avail_col = QVBoxLayout()
+        avail_col.addWidget(QLabel("Available"))
+        self.available_list = QListWidget()
+        self.available_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.available_list.itemDoubleClicked.connect(lambda _i: self._add_selected())
+        avail_col.addWidget(self.available_list)
+
+        # Middle: move buttons.
+        btn_col = QVBoxLayout()
+        btn_col.addStretch(1)
+        for text, tip, slot in (
+            (">", "Add highlighted datasets", self._add_selected),
+            (">>", "Add all datasets", self._add_all),
+            ("<", "Remove highlighted datasets", self._remove_selected),
+            ("<<", "Remove all datasets", self._remove_all),
+        ):
+            btn = QPushButton(text)
+            btn.setToolTip(tip)
+            btn.setFixedWidth(36)
+            btn.clicked.connect(slot)
+            btn_col.addWidget(btn)
+        btn_col.addStretch(1)
+
+        # Right column: datasets to plot, in the order they were added.
+        sel_col = QVBoxLayout()
+        sel_col.addWidget(QLabel("Plotted (in order)"))
+        self.selected_list = QListWidget()
+        self.selected_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.selected_list.itemDoubleClicked.connect(lambda _i: self._remove_selected())
+        sel_col.addWidget(self.selected_list)
+
+        # Far right: reorder the Plotted column. Colours stay tied to
+        # position, so the dataset on top always gets the first colour.
+        order_col = QVBoxLayout()
+        order_col.addStretch(1)
+        for text, tip, step in (("▲", "Move highlighted dataset up", -1),
+                                ("▼", "Move highlighted dataset down", +1)):
+            btn = QPushButton(text)
+            btn.setToolTip(tip)
+            btn.setFixedWidth(36)
+            btn.clicked.connect(lambda _c=False, s=step: self._move_selected(s))
+            order_col.addWidget(btn)
+        order_col.addStretch(1)
+
+        group_layout.addLayout(avail_col)
+        group_layout.addLayout(btn_col)
+        group_layout.addLayout(sel_col)
+        group_layout.addLayout(order_col)
         controls.addWidget(group)
 
         ctrl_group = QGroupBox("Extraction")
@@ -65,7 +124,8 @@ class _BaseSliceWidget(QWidget):
         self.value_spin.setRange(*self.value_range)
         self.value_spin.setDecimals(self.value_decimals)
         self.value_spin.setValue(self.value_default)
-        ctrl_layout.addRow(f"{self.value_label}{self.value_suffix}:", self.value_spin)
+        self.value_label_widget = QLabel(self._value_label_text())
+        ctrl_layout.addRow(self.value_label_widget, self.value_spin)
 
         extract_btn = QPushButton("Extract")
         extract_btn.clicked.connect(self.extract)
@@ -80,39 +140,99 @@ class _BaseSliceWidget(QWidget):
 
         controls_widget = QWidget()
         controls_widget.setLayout(controls)
-        controls_widget.setMaximumWidth(300)
+        controls_widget.setMaximumWidth(460)
 
         self.canvas = MplCanvas(figsize=(8, 6))
 
         root.addWidget(controls_widget)
         root.addWidget(self.canvas, stretch=1)
 
-    def _refresh_dataset_list(self):
-        checked_before = {
-            self.dataset_list.item(i).text()
-            for i in range(self.dataset_list.count())
-            if self.dataset_list.item(i).checkState() == Qt.Checked
-        }
-        self.dataset_list.clear()
-        for label in self.app_state.processed_labels():
+    # --- dataset columns ----------------------------------------------------
+
+    @staticmethod
+    def _labels_in(list_widget):
+        return [list_widget.item(i).text() for i in range(list_widget.count())]
+
+    def _set_columns(self, selected):
+        """Rebuild both columns. ``selected`` is the ordered plotted list;
+        everything else processed goes to the Available column (in the
+        processed order). Plotted entries get a colour swatch matching the
+        default Matplotlib colour cycle, in order.
+        """
+        all_labels = self.app_state.processed_labels()
+        selected = [l for l in selected if l in all_labels]
+
+        self.available_list.clear()
+        for label in all_labels:
+            if label not in selected:
+                self.available_list.addItem(label)
+
+        self.selected_list.clear()
+        for i, label in enumerate(selected):
             item = QListWidgetItem(label)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            should_check = (not checked_before) or (label in checked_before)
-            item.setCheckState(Qt.Checked if should_check else Qt.Unchecked)
-            self.dataset_list.addItem(item)
+            item.setIcon(self._swatch(DEFAULT_COLORS[i % len(DEFAULT_COLORS)]))
+            self.selected_list.addItem(item)
+
+    @staticmethod
+    def _swatch(color):
+        pix = QPixmap(12, 12)
+        pix.fill(QColor(color))
+        return QIcon(pix)
+
+    def _refresh_dataset_list(self):
+        # Keep whatever was already added (and still exists); start empty
+        # the first time.
+        self._set_columns(self._labels_in(self.selected_list))
+
+    def _add_selected(self):
+        # Add in the order they appear in the Available column.
+        picked = [self.available_list.item(i).text()
+                  for i in range(self.available_list.count())
+                  if self.available_list.item(i).isSelected()]
+        if picked:
+            self._set_columns(self._labels_in(self.selected_list) + picked)
+
+    def _add_all(self):
+        self._set_columns(self._labels_in(self.selected_list)
+                          + self._labels_in(self.available_list))
+
+    def _remove_selected(self):
+        keep = [self.selected_list.item(i).text()
+                for i in range(self.selected_list.count())
+                if not self.selected_list.item(i).isSelected()]
+        self._set_columns(keep)
+
+    def _remove_all(self):
+        self._set_columns([])
+
+    def _move_selected(self, step):
+        """Move the highlighted Plotted entries up (step=-1) or down (+1).
+        Colours follow position, so the colour order itself never changes.
+        """
+        labels = self._labels_in(self.selected_list)
+        rows = [i for i in range(len(labels)) if self.selected_list.item(i).isSelected()]
+        if not rows:
+            return
+        if (step < 0 and rows[0] == 0) or (step > 0 and rows[-1] == len(labels) - 1):
+            return  # already at the edge
+        for r in (rows if step < 0 else reversed(rows)):
+            labels[r], labels[r + step] = labels[r + step], labels[r]
+        self._set_columns(labels)
+        for r in rows:
+            self.selected_list.item(r + step).setSelected(True)
+        # Redraw the current slice in the new order, if one is shown.
+        if self._last_series:
+            self.extract()
 
     def _checked_labels(self):
-        return [
-            self.dataset_list.item(i).text()
-            for i in range(self.dataset_list.count())
-            if self.dataset_list.item(i).checkState() == Qt.Checked
-        ]
+        """Datasets to plot, in the order they were added."""
+        return self._labels_in(self.selected_list)
 
     def extract(self):
         labels = self._checked_labels()
         if not labels:
             QMessageBox.information(self, "No datasets selected",
-                                     "Check at least one dataset in the list.")
+                                     "Add at least one dataset to the Plotted column.")
             return
 
         self.canvas.figure.clear()
@@ -122,16 +242,17 @@ class _BaseSliceWidget(QWidget):
         x_values = None
         target = self.value_spin.value()
 
-        for label in labels:
+        for idx, label in enumerate(labels):
             result = self.app_state.get_processed(label)
             if result is None:
                 continue
             x, y, actual = self._slice(result, target)
             if x is None:
                 continue
-            ax.plot(x, y, marker="o", markersize=3, linewidth=1.5, label=f"{label}")
-            series[label] = y
-            x_values = x  # shared axis across datasets
+            ax.plot(x, y, marker="o", markersize=3, linewidth=1.5, label=f"{label}",
+                    color=DEFAULT_COLORS[idx % len(DEFAULT_COLORS)])
+            series[label] = (np.asarray(x), np.asarray(y))  # each dataset keeps its own x
+            x_values = x
 
         self._finalize_axes(ax, target)
         self.app_state.apply_ranges_to_axes(ax, x_kind=self.x_range_kind)
@@ -167,13 +288,55 @@ class _BaseSliceWidget(QWidget):
         elif path.lower().endswith(".xlsx"):
             fmt = "excel"
 
+        x_min, x_max = self._visible_x_range()
+        clipped = {}
+        for label, (x, y) in self._last_series.items():
+            mask = (x >= x_min) & (x <= x_max)
+            if np.any(mask):
+                clipped[label] = (x[mask], y[mask])
+        if not clipped:
+            QMessageBox.information(self, "Nothing to export",
+                                     "No data points fall inside the displayed range.")
+            return
+
         try:
-            export_slice(self._last_x, self._last_series, path, fmt=fmt, x_label=self.x_label)
+            x_label = (f"field ({self.app_state.field_unit})"
+                       if self.x_range_kind == "field" else self.x_label)
+            export_slices_xy(clipped, path, fmt=fmt, x_label=x_label)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
 
-        QMessageBox.information(self, "Export complete", f"Slice exported to:\n{path}")
+        QMessageBox.information(
+            self, "Export complete",
+            f"Slice exported to:\n{path}\n\n"
+            f"Range exported: {x_min:g} to {x_max:g}")
+
+    def _visible_x_range(self):
+        """The x-range currently shown on the plot: the global display range
+        (or any toolbar zoom on top of it). Falls back to all data.
+        """
+        axes = self.canvas.figure.axes
+        if axes:
+            lo, hi = axes[0].get_xlim()
+            return min(lo, hi), max(lo, hi)
+        return -np.inf, np.inf
+
+    # --- field unit ---------------------------------------------------------
+
+    value_is_field = False  # True when the spinbox value is a magnetic field
+
+    def _value_label_text(self):
+        suffix = f" ({self.app_state.field_unit})" if self.value_is_field else self.value_suffix
+        return f"{self.value_label}{suffix}:"
+
+    def _on_field_unit_changed(self, ratio):
+        if self.value_is_field:
+            rescale_field_spin(self.value_spin, ratio)
+        self.value_label_widget.setText(self._value_label_text())
+        # Redraw the current slice in the new unit (data are already converted).
+        if self._last_series and self._checked_labels():
+            self.extract()
 
     # --- subclass hooks ---------------------------------------------------
 
@@ -200,7 +363,7 @@ class FrequencySliceWidget(_BaseSliceWidget):
         return H, sig, actual_freq
 
     def _finalize_axes(self, ax, target):
-        ax.set_xlabel("Magnetic Field")
+        ax.set_xlabel(self.app_state.field_axis_label())
         ax.set_ylabel("Signal")
         ax.set_title(f"Frequency Slice near {target:g} GHz")
 
@@ -212,6 +375,7 @@ class FieldSliceWidget(_BaseSliceWidget):
     x_range_kind = "frequency"
     value_label = "Field"
     value_suffix = ""
+    value_is_field = True
     value_range = (-1e6, 1e6)
     value_default = 0.1
     value_decimals = 6
@@ -223,7 +387,7 @@ class FieldSliceWidget(_BaseSliceWidget):
     def _finalize_axes(self, ax, target):
         ax.set_xlabel("Frequency (GHz)")
         ax.set_ylabel("Signal")
-        ax.set_title(f"Field Slice near {target:g}")
+        ax.set_title(f"Field Slice near {target:g} {self.app_state.field_unit}")
 
 
 class SectionTab(QWidget):

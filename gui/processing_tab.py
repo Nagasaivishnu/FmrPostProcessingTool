@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from gui.app_state import FIELD_UNITS, rescale_field_spin
 from processing.dataset_processor import process_dataset
 from processing.preprocessing import validate_savgol
 from plotting.mpl_canvas import MplCanvas
@@ -34,6 +35,7 @@ class ProcessingTab(QWidget):
         self.app_state = app_state
         self._build_ui()
         self.app_state.display_range_changed.connect(self._apply_ranges_to_preview)
+        self.app_state.field_unit_changed.connect(self._on_field_unit_changed)
 
     # ------------------------------------------------------------------ UI
 
@@ -168,8 +170,17 @@ class ProcessingTab(QWidget):
         every tab (Heatmap, Sections, Peak Analysis, and this preview).
         Each range is independently enabled; when off, that axis auto-scales.
         """
-        group = QGroupBox("E. Display Ranges (applied to all tabs)")
+        group = QGroupBox("E. Field Unit && Display Ranges (applied to all tabs)")
         layout = QFormLayout(group)
+
+        self.field_unit_combo = QComboBox()
+        self.field_unit_combo.addItems(list(FIELD_UNITS.keys()))
+        self.field_unit_combo.setCurrentText(self.app_state.field_unit)
+        self.field_unit_combo.setToolTip(
+            "Unit for magnetic field in every plot, input and export "
+            "(1 T = 1000 mT = 10000 Oe). Raw files are read in tesla.")
+        self.field_unit_combo.currentTextChanged.connect(self.app_state.set_field_unit)
+        layout.addRow("Field unit:", self.field_unit_combo)
 
         self.freq_range_checkbox = QCheckBox("Limit frequency range (GHz)")
         self.freq_range_checkbox.toggled.connect(self._on_display_range_changed)
@@ -208,10 +219,38 @@ class ProcessingTab(QWidget):
         self.field_max_spin.setValue(0.3)
         self.field_max_spin.setEnabled(False)
         self.field_max_spin.valueChanged.connect(self._on_display_range_changed)
-        layout.addRow("Min Field:", self.field_min_spin)
-        layout.addRow("Max Field:", self.field_max_spin)
+        self.field_min_label = QLabel()
+        self.field_max_label = QLabel()
+        self._update_field_labels()
+        layout.addRow(self.field_min_label, self.field_min_spin)
+        layout.addRow(self.field_max_label, self.field_max_spin)
 
         return group
+
+    def _update_field_labels(self):
+        unit = self.app_state.field_unit
+        self.field_min_label.setText(f"Min Field ({unit}):")
+        self.field_max_label.setText(f"Max Field ({unit}):")
+
+    def _on_field_unit_changed(self, ratio: float):
+        """Convert the field-range numbers to the new unit (app_state has
+        already rescaled its stored range) and relabel the preview axis."""
+        if self.field_unit_combo.currentText() != self.app_state.field_unit:
+            self.field_unit_combo.blockSignals(True)
+            self.field_unit_combo.setCurrentText(self.app_state.field_unit)
+            self.field_unit_combo.blockSignals(False)
+        rescale_field_spin(self.field_min_spin, ratio)
+        rescale_field_spin(self.field_max_spin, ratio)
+        self._update_field_labels()
+        axes = self.preview_canvas.figure.axes
+        if axes:  # preview line is in the old unit: rescale it in place
+            for line in axes[0].get_lines():
+                line.set_xdata(line.get_xdata() * ratio)
+            axes[0].set_xlabel(self.app_state.field_axis_label())
+            axes[0].relim()
+            axes[0].autoscale_view()
+            self.app_state.apply_ranges_to_axes(axes[0], x_kind="field")
+            self.preview_canvas.draw()
 
     def _on_display_range_changed(self, *_args):
         """Enable/disable the spinboxes to match their checkboxes, push the
@@ -309,7 +348,8 @@ class ProcessingTab(QWidget):
             QMessageBox.information(self, "No data", "Load at least one experimental dataset in Tab 1 first.")
             return
 
-        result = process_dataset(entry.dataset, self.app_state.settings)
+        result = self.app_state.apply_field_unit(
+            process_dataset(entry.dataset, self.app_state.settings))
         if not result.sorted_frequencies:
             QMessageBox.warning(self, "Preview failed", "No frequencies could be processed.")
             return
@@ -320,7 +360,7 @@ class ProcessingTab(QWidget):
         self.preview_canvas.figure.clear()
         ax = self.preview_canvas.figure.add_subplot(111)
         ax.plot(H, sig, color="#3366cc")
-        ax.set_xlabel("Magnetic Field")
+        ax.set_xlabel(self.app_state.field_axis_label())
         ax.set_ylabel(self.app_state.settings.output_quantity.replace("_", " ").title())
         ax.set_title(f"{entry.label} @ {freq:g} GHz (preview)")
         ax.grid(alpha=0.3)
@@ -349,7 +389,8 @@ class ProcessingTab(QWidget):
         self.app_state.processed.clear()
         all_warnings = []
         for entry in loaded:
-            result = process_dataset(entry.dataset, self.app_state.settings)
+            result = self.app_state.apply_field_unit(
+                process_dataset(entry.dataset, self.app_state.settings))
             result.label = entry.label
             self.app_state.processed[entry.label] = result
             all_warnings.extend(f"[{entry.label}] {w}" for w in result.warnings)

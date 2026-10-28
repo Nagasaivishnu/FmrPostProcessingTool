@@ -22,11 +22,14 @@ from __future__ import annotations
 
 import itertools
 
+import numpy as np
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QScrollArea, QSpinBox, QTextEdit, QVBoxLayout,
+    QWidget,
 )
 import matplotlib.pyplot as plt
 
@@ -37,6 +40,8 @@ from processing.peak_analysis import (
 from processing.curve_fitting import (
     DEFAULT_MODEL_KEY, FIT_MODELS, FIT_MODELS_BY_KEY, fit_peak_result, format_fit,
 )
+from gui.app_state import rescale_field_spin
+from gui.manual_curves import ManualCurvesPanel
 from utils.exporters import export_fit_parameters, export_peak_data
 
 # Distinct line styles per peak rank so overlapping tracks stay readable;
@@ -54,10 +59,12 @@ class PeakTab(QWidget):
         self._last_max_field = None   # field cutoff used in the most recent run (or None)
         self._last_ref_cutoff = None  # background ReferenceFieldCutoff used (or None)
         self._gap_spinboxes = []  # one QDoubleSpinBox per peak beyond the first
+        self._fit_text = ""       # curve-fit summary shown in the results box
         self._build_ui()
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
         self._rebuild_gap_settings(self.num_peaks_spin.value())
         self.app_state.display_range_changed.connect(self._reapply_display_ranges)
+        self.app_state.field_unit_changed.connect(self._on_field_unit_changed)
 
     def _reapply_display_ranges(self):
         """Re-render the current peak plot so the new global ranges apply."""
@@ -75,11 +82,22 @@ class PeakTab(QWidget):
         controls.addWidget(self._build_reference_group())
         controls.addWidget(self._build_gap_group())
         controls.addWidget(self._build_fit_group())
+        self.manual_panel = ManualCurvesPanel(self.app_state)
+        self.manual_panel.set_last_fits_provider(lambda: self._last_fits)
+        self.manual_panel.changed.connect(self._on_manual_curves_changed)
+        controls.addWidget(self.manual_panel)
         controls.addStretch(1)
 
-        controls_widget = QWidget()
-        controls_widget.setLayout(controls)
-        controls_widget.setMaximumWidth(340)
+        inner = QWidget()
+        inner.setLayout(controls)
+        # Scrollable: the control column is taller than most screens.
+        controls_widget = QScrollArea()
+        controls_widget.setWidget(inner)
+        controls_widget.setWidgetResizable(True)
+        controls_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Wide enough for the controls' own minimum width (+ scroll bar).
+        controls_widget.setFixedWidth(
+            min(max(inner.minimumSizeHint().width() + 24, 360), 540))
 
         self.canvas = MplCanvas(figsize=(8, 6))
 
@@ -130,7 +148,8 @@ class PeakTab(QWidget):
         self.max_field_spin.setToolTip(
             "Only peaks at or below this field are detected and used for "
             "fitting; peaks above it are ignored.")
-        layout.addRow("Max Field (T):", self.max_field_spin)
+        self.max_field_label = QLabel()
+        layout.addRow(self.max_field_label, self.max_field_spin)
 
         find_btn = QPushButton("Find Peaks")
         find_btn.clicked.connect(self.find_peaks)
@@ -179,7 +198,9 @@ class PeakTab(QWidget):
         self.ref_margin_spin.setToolTip(
             "Subtracted from the background field so sample peaks are searched "
             "strictly below the background boundary.")
-        layout.addRow("Margin below (T):", self.ref_margin_spin)
+        self.ref_margin_label = QLabel()
+        layout.addRow(self.ref_margin_label, self.ref_margin_spin)
+        self._update_field_unit_labels()
 
         return group
 
@@ -293,6 +314,36 @@ class PeakTab(QWidget):
 
     # --------------------------------------------------------------- logic
 
+    def _update_field_unit_labels(self):
+        unit = self.app_state.field_unit
+        self.max_field_label.setText(f"Max Field ({unit}):")
+        self.ref_margin_label.setText(f"Margin below ({unit}):")
+
+    def _on_field_unit_changed(self, ratio: float):
+        """Convert every field-valued setting to the new unit. Old peak
+        results are in the old unit, so they are cleared (run Find Peaks
+        again)."""
+        rescale_field_spin(self.max_field_spin, ratio)
+        rescale_field_spin(self.ref_margin_spin, ratio)
+        for spin in self._gap_spinboxes:
+            rescale_field_spin(spin, ratio)
+        self._update_field_unit_labels()
+        self._rebuild_gap_settings(self.num_peaks_spin.value())
+
+        had_results = bool(self._last_peak_results)
+        self._last_peak_results = {}
+        self._last_fits = {}
+        self._last_max_field = None
+        self._last_ref_cutoff = None
+        if had_results:
+            self.canvas.figure.clear()
+            ax = self.canvas.figure.add_subplot(111)
+            ax.text(0.5, 0.5, f"Field unit changed to {self.app_state.field_unit}.\n"
+                    "Press 'Find Peaks' again.",
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            self.canvas.draw()
+
     def _rebuild_gap_settings(self, num_peaks: int):
         """Rebuild the gap-setting spinboxes: one per peak beyond the
         first (num_peaks - 1 total), each defaulting to DEFAULT_MAX_GAP,
@@ -311,9 +362,13 @@ class PeakTab(QWidget):
             spin.setRange(0.0, 1e6)
             spin.setDecimals(5)
             spin.setSingleStep(0.01)
-            value = previous_values[i] if i < len(previous_values) else DEFAULT_MAX_GAP
+            f = self.app_state.field_factor
+            spin.setRange(0.0, 1e6 * f)
+            spin.setSingleStep(0.01 * f)
+            value = previous_values[i] if i < len(previous_values) else DEFAULT_MAX_GAP * f
             spin.setValue(value)
-            self.gap_layout.addRow(f"Peak {i + 2} Max Gap (T):", spin)
+            self.gap_layout.addRow(
+                f"Peak {i + 2} Max Gap ({self.app_state.field_unit}):", spin)
             self._gap_spinboxes.append(spin)
 
         self._update_gap_enabled_state()
@@ -420,13 +475,43 @@ class PeakTab(QWidget):
         self._last_ref_cutoff = ref_cutoff
         # Re-finding peaks invalidates any previous fit.
         self._last_fits = {}
-        self.fit_results_text.clear()
+        self._fit_text = ""
+        self._update_results_text()
 
         self._render(results, fits=None)
 
         if all_warnings:
             QMessageBox.warning(self, "Peak detection completed with warnings",
                                  "\n".join(all_warnings[:30]))
+
+    # ------------------------------------------------------- manual curves
+
+    def _on_manual_curves_changed(self):
+        self._update_results_text()
+        self._render(self._last_peak_results, self._last_fits)
+
+    def _update_results_text(self):
+        parts = [getattr(self, "_fit_text", "")]
+        manual = self.manual_panel.compare_text(self._last_peak_results)
+        if manual:
+            parts.append(manual)
+        self.fit_results_text.setPlainText("\n\n".join(p for p in parts if p))
+
+    def _draw_manual_curves(self, ax, results):
+        fields = []
+        for pr in (results or {}).values():
+            for i in range(pr.num_peaks):
+                _f, h = pr.track(i)
+                fields.extend(np.asarray(h, float)[np.isfinite(np.asarray(h, float))])
+        data_range = (min(fields), max(fields)) if fields else None
+        for i, curve in enumerate(self.manual_panel.curves):
+            if not curve.visible:
+                continue
+            H, f = self.manual_panel.curve_xy(curve, data_range)
+            if H.size:
+                ax.plot(H, f, linestyle="--", linewidth=2.0, zorder=6,
+                        color=self.manual_panel.color_of(i),
+                        label=f"{curve.name} (manual)")
 
     def _render(self, results, fits=None):
         """Draw peak tracks (markers + dash-dot line per peak rank, one
@@ -463,7 +548,7 @@ class PeakTab(QWidget):
                                 label="rejected (outliers)" if not rejected_labeled else None)
                         rejected_labeled = True
 
-        ax.set_xlabel("Peak Field Position")
+        ax.set_xlabel(self.app_state.field_axis_label("Peak Field Position"))
         ax.set_ylabel("Frequency (GHz)")
         title = "Peak Position vs Frequency"
         if overlay:
@@ -473,7 +558,8 @@ class PeakTab(QWidget):
         if getattr(self, "_last_max_field", None) is not None:
             ax.axvline(self._last_max_field, color="0.5", linestyle=":",
                        linewidth=1.5, zorder=1,
-                       label=f"field cutoff = {self._last_max_field:g}")
+                       label=f"field cutoff = {self._last_max_field:g} "
+                             f"{self.app_state.field_unit}")
 
         ref = getattr(self, "_last_ref_cutoff", None)
         if ref is not None and getattr(ref, "freqs", None) is not None and ref.freqs.size:
@@ -481,10 +567,13 @@ class PeakTab(QWidget):
             ax.plot(ref.fields, ref.freqs, color="0.4", linestyle="--",
                     linewidth=1.5, zorder=1, label="background reference cutoff")
 
+        self._draw_manual_curves(ax, results)
+
         # Global display ranges: x = field, y = frequency.
         self.app_state.apply_ranges_to_axes(ax, x_kind="field", y_kind="frequency")
 
-        ax.legend(fontsize=8)
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
         self.canvas.figure.tight_layout()
         self.canvas.draw()
@@ -503,6 +592,9 @@ class PeakTab(QWidget):
         lines = [f"Model:  {model.formula}"]
         if model.note:
             lines.append(model.note)
+        unit = self.app_state.field_unit
+        lines.append(f"Field unit: {unit}  (H, M_eff, H_k in {unit}; "
+                     f"gamma*mu0/2pi in GHz/{unit})")
         if reject:
             lines.append(f"Outlier rejection: ON (sigma = {sigma:g})")
         else:
@@ -521,7 +613,8 @@ class PeakTab(QWidget):
             lines.append("")
 
         self._last_fits = fits
-        self.fit_results_text.setPlainText("\n".join(lines))
+        self._fit_text = "\n".join(lines)
+        self._update_results_text()
         self._render(self._last_peak_results, fits=fits)
 
         if not any_success:
@@ -549,7 +642,8 @@ class PeakTab(QWidget):
             fmt = "excel"
 
         try:
-            export_peak_data(self._last_peak_results, path, fmt=fmt)
+            export_peak_data(self._last_peak_results, path, fmt=fmt,
+                             field_unit=self.app_state.field_unit)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
@@ -574,7 +668,8 @@ class PeakTab(QWidget):
             fmt = "excel"
 
         try:
-            export_fit_parameters(self._last_fits, path, fmt=fmt)
+            export_fit_parameters(self._last_fits, path, fmt=fmt,
+                                  field_unit=self.app_state.field_unit)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return

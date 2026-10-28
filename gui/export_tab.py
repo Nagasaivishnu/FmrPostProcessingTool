@@ -20,10 +20,10 @@ from PyQt5.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from utils.exporters import export_heatmap, save_figure
+from utils.exporters import export_heatmap
 
 HEATMAP_FORMATS = ["csv", "txt", "npy", "mat"]
-FIGURE_FORMATS = ["png", "svg", "pdf", "eps"]
+FIGURE_FORMATS = ["png", "tiff", "pdf", "svg", "eps"]
 DPI_OPTIONS = [300, 600, 1200]
 
 
@@ -114,7 +114,7 @@ class ExportTab(QWidget):
             return
 
         try:
-            export_heatmap(result, path, fmt=fmt)
+            export_heatmap(result, path, fmt=fmt, field_unit=self.app_state.field_unit)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
@@ -135,25 +135,30 @@ class ExportTab(QWidget):
         if not path:
             return
 
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
 
-        field_grid, freqs, matrix = result.as_matrix()
-        fig, ax = plt.subplots(figsize=(8, 6))
-        im = ax.imshow(matrix, aspect="auto", origin="lower", cmap="RdYlBu_r",
-                        extent=[field_grid.min(), field_grid.max(), freqs.min(), freqs.max()])
-        ax.set_xlabel("Magnetic Field")
-        ax.set_ylabel("Frequency (GHz)")
-        ax.set_title(f"FMR Map: {label}")
-        fig.colorbar(im, ax=ax, label="Intensity")
-        self.app_state.apply_ranges_to_axes(ax, x_kind="field", y_kind="frequency")
-        fig.tight_layout()
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+        from plotting.heatmap_render import (
+            fit_figure_height, render_heatmap, save_heatmap_figure)
+
+        # Same renderer and display settings as the Heatmap tab (font size,
+        # Origin style, aspect ratio, scaling, colormap, display range).
+        style = self.app_state.heatmap_style
+        fig = Figure(figsize=style.png_figsize())
+        FigureCanvasAgg(fig)
+        render_heatmap(
+            fig, result, label, self.app_state.get_heatmap_cmap(label), style,
+            apply_ranges=lambda ax: self.app_state.apply_ranges_to_axes(
+                ax, x_kind="field", y_kind="frequency"))
 
         try:
-            save_figure(fig, path, fmt=fmt, dpi=dpi)
+            fit_figure_height(fig, style)
+            if not path.lower().endswith(f".{fmt}"):
+                path += f".{fmt}"
+            save_heatmap_figure(fig, path, fmt, dpi)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
-        finally:
-            plt.close(fig)
 
         QMessageBox.information(self, "Export complete", f"Figure exported to:\n{path}")
