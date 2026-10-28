@@ -37,8 +37,9 @@ from PyQt5.QtWidgets import (
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from plotting.heatmap_render import (
-    ASPECT_PRESETS, SAVE_FORMATS, WIDTH_PRESETS_CM, fit_figure_height,
-    render_heatmap, save_heatmap_figure,
+    ASPECT_PRESETS, OVERLAY_BACKGROUNDS, OVERLAY_PAIRS, OVERLAY_SIGNALS,
+    SAVE_FORMATS, WIDTH_PRESETS_CM, fit_figure_height, render_heatmap,
+    render_overlay, save_heatmap_figure,
 )
 from plotting.mpl_canvas import MplCanvas
 
@@ -50,6 +51,8 @@ COLORMAPS = [
 ]
 INTERPOLATIONS = ["nearest", "bilinear", "bicubic"]
 DPI_OPTIONS = ["300", "600", "1200"]
+MODE_SINGLE = "Single dataset"
+MODE_OVERLAY = "Two-colour overlay (A + B)"
 
 
 def _safe_filename(label: str) -> str:
@@ -62,6 +65,7 @@ class HeatmapTab(QWidget):
         super().__init__(parent)
         self.app_state = app_state
         self._build_ui()
+        self._on_mode_changed()  # start in single-dataset mode (overlay hidden)
         self.app_state.processed_changed.connect(self._refresh_dataset_list)
         self.app_state.display_range_changed.connect(self.refresh_plot)
         self.app_state.field_unit_changed.connect(self._on_field_unit_changed)
@@ -77,7 +81,10 @@ class HeatmapTab(QWidget):
 
         controls = QVBoxLayout()
         controls.addWidget(self._build_dataset_group())
-        controls.addWidget(self._build_colour_group())
+        self.overlay_group = self._build_overlay_group()
+        controls.addWidget(self.overlay_group)
+        self.colour_group = self._build_colour_group()
+        controls.addWidget(self.colour_group)
         controls.addWidget(self._build_style_group())
         controls.addWidget(self._build_save_group())
 
@@ -104,12 +111,86 @@ class HeatmapTab(QWidget):
 
     def _build_dataset_group(self) -> QGroupBox:
         group = QGroupBox("Dataset")
-        layout = QVBoxLayout(group)
+        layout = QFormLayout(group)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems([MODE_SINGLE, MODE_OVERLAY])
+        self.mode_combo.setToolTip("Two-colour overlay: dataset A and B in one "
+                                   "plot, each in its own colour; where both "
+                                   "have a mode the colours add up to white")
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        layout.addRow("Plot:", self.mode_combo)
 
         self.dataset_combo = QComboBox()
         self.dataset_combo.currentTextChanged.connect(self._on_dataset_changed)
-        layout.addWidget(self.dataset_combo)
+        self.dataset_a_label = QLabel("Dataset:")
+        layout.addRow(self.dataset_a_label, self.dataset_combo)
 
+        self.dataset_b_combo = QComboBox()
+        self.dataset_b_combo.currentTextChanged.connect(self.refresh_plot)
+        self.dataset_b_label = QLabel("Dataset B:")
+        layout.addRow(self.dataset_b_label, self.dataset_b_combo)
+
+        return group
+
+    def _build_overlay_group(self) -> QGroupBox:
+        group = QGroupBox("Two-Colour Overlay")
+        layout = QFormLayout(group)
+
+        self.pair_combo = QComboBox()
+        self.pair_combo.addItems(list(OVERLAY_PAIRS.keys()))
+        self.pair_combo.setToolTip("Colour of A / colour of B. Each pair adds "
+                                   "up to white where both datasets have signal.")
+        layout.addRow("Colours A / B:", self.pair_combo)
+
+        self.bg_combo = QComboBox()
+        self.bg_combo.addItems(OVERLAY_BACKGROUNDS)
+        self.bg_combo.setToolTip("Black: overlap shows white (best on screen). "
+                                 "White: overlap shows black (better for print).")
+        layout.addRow("Background:", self.bg_combo)
+
+        self.signal_combo = QComboBox()
+        self.signal_combo.addItems(OVERLAY_SIGNALS)
+        self.signal_combo.setToolTip("Which part of the processed signal lights "
+                                     "up. Absolute value suits derivative data.")
+        layout.addRow("Signal:", self.signal_combo)
+
+        self.sat_spin = QDoubleSpinBox()
+        self.sat_spin.setRange(50.0, 100.0)
+        self.sat_spin.setDecimals(1)
+        self.sat_spin.setSingleStep(0.5)
+        self.sat_spin.setValue(self.style.overlay_saturation)
+        self.sat_spin.setSuffix(" %")
+        self.sat_spin.setToolTip("Each dataset is scaled so this percentile of "
+                                 "its signal is full colour. Lower = brighter "
+                                 "weak modes.")
+        layout.addRow("Saturate at:", self.sat_spin)
+
+        self.gain_a_spin = QDoubleSpinBox()
+        self.gain_b_spin = QDoubleSpinBox()
+        for spin in (self.gain_a_spin, self.gain_b_spin):
+            spin.setRange(0.05, 20.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.1)
+            spin.setValue(1.0)
+            spin.setToolTip("Brightness multiplier for this dataset")
+        layout.addRow("Brightness A:", self.gain_a_spin)
+        layout.addRow("Brightness B:", self.gain_b_spin)
+
+        swap_btn = QPushButton("Swap A and B")
+        swap_btn.clicked.connect(self._swap_ab)
+        layout.addRow(swap_btn)
+
+        note = QLabel("Each dataset is normalised separately, so samples with "
+                      "very different intensity still show equally.")
+        note.setStyleSheet("color: #666;")
+        note.setWordWrap(True)
+        layout.addRow(note)
+
+        for w in (self.pair_combo, self.bg_combo, self.signal_combo):
+            w.currentTextChanged.connect(self._on_style_changed)
+        for w in (self.sat_spin, self.gain_a_spin, self.gain_b_spin):
+            w.valueChanged.connect(self._on_style_changed)
         return group
 
     def _build_colour_group(self) -> QGroupBox:
@@ -130,9 +211,9 @@ class HeatmapTab(QWidget):
         cmap_note.setWordWrap(True)
         layout.addRow(cmap_note)
 
-        apply_all_btn = QPushButton("Apply Colormap to All Datasets")
-        apply_all_btn.clicked.connect(self._apply_colormap_to_all)
-        layout.addRow(apply_all_btn)
+        self.apply_all_btn = QPushButton("Apply Colormap to All Datasets")
+        self.apply_all_btn.clicked.connect(self._apply_colormap_to_all)
+        layout.addRow(self.apply_all_btn)
 
         self.auto_scale_checkbox = QCheckBox("Auto Scale")
         self.auto_scale_checkbox.setChecked(True)
@@ -285,7 +366,8 @@ class HeatmapTab(QWidget):
         layout.addRow(save_one_btn)
 
         save_all_btn = QPushButton("Save All Datasets...")
-        save_all_btn.setToolTip("One file per dataset, all with the current display settings")
+        save_all_btn.setToolTip("One file per dataset (single maps, even in overlay "
+                                "mode), all with the current display settings")
         save_all_btn.clicked.connect(self._save_all_pngs)
         layout.addRow(save_all_btn)
 
@@ -423,23 +505,76 @@ class HeatmapTab(QWidget):
         s.save_format = self.format_combo.currentText()
         s.wysiwyg = self.wysiwyg_checkbox.isChecked()
 
+        s.overlay_pair = self.pair_combo.currentText()
+        s.overlay_background = self.bg_combo.currentText()
+        s.overlay_signal = self.signal_combo.currentText()
+        s.overlay_saturation = self.sat_spin.value()
+        s.gain_a = self.gain_a_spin.value()
+        s.gain_b = self.gain_b_spin.value()
+
         self.refresh_plot()
 
     def _refresh_dataset_list(self):
+        labels = self.app_state.processed_labels()
         current = self.dataset_combo.currentText()
-        self.dataset_combo.blockSignals(True)
-        self.dataset_combo.clear()
-        self.dataset_combo.addItems(self.app_state.processed_labels())
-        if current in self.app_state.processed_labels():
+        current_b = self.dataset_b_combo.currentText()
+        for combo in (self.dataset_combo, self.dataset_b_combo):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(labels)
+        if current in labels:
             self.dataset_combo.setCurrentText(current)
-        self.dataset_combo.blockSignals(False)
+        if current_b in labels:
+            self.dataset_b_combo.setCurrentText(current_b)
+        elif len(labels) > 1:  # default B = a different dataset than A
+            other = [l for l in labels if l != self.dataset_combo.currentText()]
+            self.dataset_b_combo.setCurrentText(other[0])
+        for combo in (self.dataset_combo, self.dataset_b_combo):
+            combo.blockSignals(False)
         self._load_cmap_for_current_dataset()
         self.refresh_plot()
 
-    def _render(self, fig, label, scale=1.0):
-        result = self.app_state.get_processed(label) if label else None
+    def _overlay_on(self) -> bool:
+        return self.mode_combo.currentText() == MODE_OVERLAY
+
+    def _on_mode_changed(self, *_args):
+        overlay = self._overlay_on()
+        self.overlay_group.setVisible(overlay)
+        # Colormap and min/max scaling don't apply to the overlay;
+        # interpolation still does.
+        for w in (self.colormap_combo, self.reverse_cmap_checkbox,
+                  self.apply_all_btn, self.auto_scale_checkbox):
+            w.setEnabled(not overlay)
+        manual = not overlay and not self.auto_scale_checkbox.isChecked()
+        self.min_edit.setEnabled(manual)
+        self.max_edit.setEnabled(manual)
+        self.dataset_b_label.setVisible(overlay)
+        self.dataset_b_combo.setVisible(overlay)
+        self.dataset_a_label.setText("Dataset A:" if overlay else "Dataset:")
+        self.refresh_plot()
+
+    def _swap_ab(self):
+        a, b = self.dataset_combo.currentText(), self.dataset_b_combo.currentText()
+        for combo in (self.dataset_combo, self.dataset_b_combo):
+            combo.blockSignals(True)
+        self.dataset_combo.setCurrentText(b)
+        self.dataset_b_combo.setCurrentText(a)
+        for combo in (self.dataset_combo, self.dataset_b_combo):
+            combo.blockSignals(False)
+        self._load_cmap_for_current_dataset()
+        self.refresh_plot()
+
+    def _render(self, fig, label, scale=1.0, single=False):
         apply_ranges = lambda ax: self.app_state.apply_ranges_to_axes(
             ax, x_kind="field", y_kind="frequency")
+        if self._overlay_on() and not single:
+            label_b = self.dataset_b_combo.currentText()
+            render_overlay(fig, self.app_state.get_processed(label) if label else None,
+                           label,
+                           self.app_state.get_processed(label_b) if label_b else None,
+                           label_b, self.style, apply_ranges=apply_ranges, scale=scale)
+            return
+        result = self.app_state.get_processed(label) if label else None
         render_heatmap(fig, result, label, self.app_state.get_heatmap_cmap(label),
                        self.style, apply_ranges=apply_ranges, scale=scale)
 
@@ -479,11 +614,11 @@ class HeatmapTab(QWidget):
 
     # ------------------------------------------------------------ saving
 
-    def _save_png(self, label, path):
+    def _save_png(self, label, path, single=False):
         s = self.style
         fig = Figure(figsize=s.png_figsize(self.canvas.figure.get_size_inches()))
         FigureCanvasAgg(fig)
-        self._render(fig, label)
+        self._render(fig, label, single=single)
         fit_figure_height(fig, s)
         save_heatmap_figure(fig, path, s.save_format, s.dpi)
 
@@ -496,8 +631,13 @@ class HeatmapTab(QWidget):
             QMessageBox.information(self, "No data", "Process a dataset first (Tab 2).")
             return
         ext = self._ext()
+        if self._overlay_on():
+            stem = (f"{_safe_filename(label)}_vs_"
+                    f"{_safe_filename(self.dataset_b_combo.currentText())}_overlay")
+        else:
+            stem = f"{_safe_filename(label)}_heatmap"
         path, _filter = QFileDialog.getSaveFileName(
-            self, "Save Heatmap", f"{_safe_filename(label)}_heatmap.{ext}",
+            self, "Save Heatmap", f"{stem}.{ext}",
             f"{ext.upper()} (*.{ext})")
         if not path:
             return
@@ -536,7 +676,7 @@ class HeatmapTab(QWidget):
         try:
             for label, path in paths.items():
                 try:
-                    self._save_png(label, path)
+                    self._save_png(label, path, single=True)
                     saved.append(os.path.basename(path))
                 except Exception as exc:
                     failed.append(f"{label}: {exc}")

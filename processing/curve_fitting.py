@@ -111,7 +111,7 @@ FIT_MODELS: List[FitModel] = [
         formula="f = (gamma*mu0/2pi) * sqrt( H * (H + M_eff) )",
         param_names=["gamma_mu0_2pi", "M_eff"],
         func=_f_kittel_inplane,
-        note="gamma*mu0/2pi ~ 28 GHz/T for g=2; M_eff is the effective magnetization (field units).",
+        note="gamma*mu0/2pi ~ 28 GHz/T (= 2.8e-3 GHz/Oe) for g=2; M_eff is the effective magnetization (field units).",
     ),
     FitModel(
         key="kittel_inplane_aniso",

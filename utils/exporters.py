@@ -18,7 +18,8 @@ from processing.dataset_processor import ProcessedDataset
 from processing.peak_analysis import PeakResult
 
 
-def export_heatmap(result: ProcessedDataset, output_path: str, fmt: str = "csv") -> None:
+def export_heatmap(result: ProcessedDataset, output_path: str, fmt: str = "csv",
+                   field_unit: str = "T") -> None:
     """Export a processed dataset's full 2D matrix (field, frequency,
     intensity) to disk.
 
@@ -29,17 +30,19 @@ def export_heatmap(result: ProcessedDataset, output_path: str, fmt: str = "csv")
 
     fmt = fmt.lower()
     if fmt == "npy":
-        np.savez(output_path.with_suffix(".npz"), field=field_grid, frequency=freqs, intensity=matrix)
+        np.savez(output_path.with_suffix(".npz"), field=field_grid, frequency=freqs,
+                 intensity=matrix, field_unit=field_unit)
     elif fmt == "mat":
         try:
             from scipy.io import savemat
         except ImportError as exc:
             raise RuntimeError("scipy is required to export .mat files") from exc
         savemat(output_path.with_suffix(".mat"),
-                {"field": field_grid, "frequency": freqs, "intensity": matrix})
+                {"field": field_grid, "frequency": freqs, "intensity": matrix,
+                 "field_unit": field_unit})
     elif fmt in ("csv", "txt"):
         sep = "," if fmt == "csv" else "\t"
-        data = {"field": field_grid}
+        data = {f"field ({field_unit})": field_grid}
         for i, freq in enumerate(freqs):
             data[f"intensity_{freq:g}GHz"] = matrix[i, :]
         df = pd.DataFrame(data)
@@ -75,8 +78,53 @@ def export_slice(x_values: np.ndarray, series: Dict[str, np.ndarray],
         df.to_csv(output_path, index=False)
 
 
+def export_slices_xy(series: Dict[str, tuple], output_path: str,
+                     fmt: str = "csv", x_label: str = "x") -> None:
+    """Export 1D slices where each dataset may have its own x-axis, as one
+    table with a single shared x column.
+
+    ``series`` maps {dataset_label: (x_values, y_values)} in the order the
+    signal columns should appear. The x column is the union of every
+    dataset's x values; each dataset's signal sits on the row of its own x
+    value and is left blank where that dataset has no point. If a dataset
+    hits the same x value more than once, those signals are averaged.
+    Rows run in the same direction as the first dataset's sweep
+    (descending if it was swept downwards).
+
+    fmt : "csv" | "txt" | "excel"
+    """
+    output_path = Path(output_path)
+    items = [(label, np.asarray(x, dtype=float), np.asarray(y, dtype=float))
+             for label, (x, y) in series.items()]
+
+    # Round the join key so float noise (e.g. 0.1496 vs 0.14960000001)
+    # doesn't split one field value into two rows.
+    def key(x):
+        return np.round(x, 9)
+
+    df = None
+    for label, x, y in items:
+        part = (pd.DataFrame({x_label: key(x), label: y})
+                .groupby(x_label, as_index=False)[label].mean())
+        df = part if df is None else df.merge(part, on=x_label, how="outer")
+    if df is None:
+        df = pd.DataFrame({x_label: []})
+
+    first_x = items[0][1] if items else np.array([])
+    descending = len(first_x) > 1 and first_x[-1] < first_x[0]
+    df = df.sort_values(x_label, ascending=not descending).reset_index(drop=True)
+
+    fmt = fmt.lower()
+    if fmt == "excel":
+        df.to_excel(output_path.with_suffix(".xlsx"), index=False)
+    elif fmt == "txt":
+        df.to_csv(output_path, sep="\t", index=False)
+    else:
+        df.to_csv(output_path, index=False)
+
+
 def export_peak_data(peak_results: Dict[str, PeakResult], output_path: str,
-                      fmt: str = "csv") -> None:
+                      fmt: str = "csv", field_unit: str = "T") -> None:
     """Export peak-tracking results (one or more datasets) to a flat,
     long-format table: one row per (dataset, frequency, peak index).
 
@@ -94,6 +142,7 @@ def export_peak_data(peak_results: Dict[str, PeakResult], output_path: str,
     """
     output_path = Path(output_path)
 
+    field_col = f"field ({field_unit})"
     rows = []
     for label, peak_result in peak_results.items():
         for peak_idx in range(peak_result.num_peaks):
@@ -106,11 +155,11 @@ def export_peak_data(peak_results: Dict[str, PeakResult], output_path: str,
                     "dataset": label,
                     "peak_index": peak_idx + 1,
                     "frequency_GHz": freq,
-                    "field": peak_field,
+                    field_col: peak_field,
                     "intensity": peak_height,
                 })
 
-    df = pd.DataFrame(rows, columns=["dataset", "peak_index", "frequency_GHz", "field", "intensity"])
+    df = pd.DataFrame(rows, columns=["dataset", "peak_index", "frequency_GHz", field_col, "intensity"])
 
     fmt = fmt.lower()
     if fmt == "excel":
@@ -122,7 +171,7 @@ def export_peak_data(peak_results: Dict[str, PeakResult], output_path: str,
 
 
 def export_fit_parameters(dataset_fits: Dict[str, "object"], output_path: str,
-                          fmt: str = "csv") -> None:
+                          fmt: str = "csv", field_unit: str = "T") -> None:
     """Export curve-fit parameters to a flat table: one row per
     (dataset, peak). Columns include the model, formula, each fitted
     constant with its standard error, R-squared, point count, and success
@@ -150,6 +199,7 @@ def export_fit_parameters(dataset_fits: Dict[str, "object"], output_path: str,
                 "n_total": getattr(pf, "n_total", pf.n_points),
                 "r_squared": pf.r_squared,
                 "success": pf.success,
+                "field_unit": field_unit,
             }
             for name, val, err in zip(model.param_names, pf.params, pf.param_errors):
                 row[name] = val
